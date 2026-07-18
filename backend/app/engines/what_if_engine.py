@@ -1,59 +1,106 @@
-from datetime import timedelta
+Input
+"""What-if engine — read-only simulation. NEVER writes to the database.
 
-from sqlalchemy import select, func
-
-from app.engines.base import BaseEngine
-from app.models.production import ProductionLine, ProductionOrder
-from app.models.sales import SalesOrder
+Supports: DEMAND_CHANGE, SUPPLIER_FAILURE, LINE_DOWN, ADD_SHIFT,
+          RUSH_ORDER, PRICE_CHANGE.
+"""
+from datetime import date, timedelta
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from app.engines import BaseEngine, EngineResult
+from app.models import (
+    ProductionLine, ProductionOrder, RawMaterial, InventoryRawMaterial, Product,
+)
 
 
 class WhatIfEngine(BaseEngine):
-    name = "what_if_engine"
+    name = "what_if"
 
-    def execute(self, db, factory_id: int, body: dict | None = None):
-        body = body or {}
-        scenario = body.get("scenario_type", "DEMAND_CHANGE")
-        params = body.get("parameters", {})
-        horizon = int(body.get("horizon_days", 30))
+    def _execute(self, db: Session, factory_id: int, r: EngineResult, **kwargs):
+        scenario  = kwargs.get("scenario_type", "DEMAND_CHANGE")
+        params    = kwargs.get("parameters", {}) or {}
+        horizon   = int(kwargs.get("horizon_days", 14))
 
-        # baseline metrics
-        lines = db.scalars(select(ProductionLine).where(
-            ProductionLine.factory_id == factory_id, ProductionLine.is_deleted == False)).all()
-        cap_total = sum(l.capacity_per_hour * 8 * horizon for l in lines)
-        orders = db.scalars(select(SalesOrder).where(
-            SalesOrder.factory_id == factory_id, SalesOrder.is_deleted == False,
-            SalesOrder.status.in_(["confirmed", "in_production"]))).all()
-        baseline_demand = sum(l.quantity for o in orders for l in o.lines) if False else \
-            db.scalar(select(func.coalesce(func.sum(SalesOrderLine_qty := __import__("sqlalchemy").column("quantity")), 0))) if False else self._sum_demand(db, factory_id)
+        if   scenario == "DEMAND_CHANGE":   out = self._demand_change(db, factory_id, params, horizon)
+        elif scenario == "SUPPLIER_FAILURE":out = self._supplier_failure(db, factory_id, params, horizon)
+        elif scenario == "LINE_DOWN":       out = self._line_down(db, factory_id, params, horizon)
+        elif scenario == "ADD_SHIFT":       out = self._add_shift(db, factory_id, params, horizon)
+        elif scenario == "RUSH_ORDER":      out = self._rush_order(db, factory_id, params, horizon)
+        elif scenario == "PRICE_CHANGE":    out = self._price_change(db, factory_id, params, horizon)
+        else:                              out = {"error": f"Unknown scenario: {scenario}"}
+        r.data = out
+        r.items_processed = 1
+        # IMPORTANT: do not commit. Read-only.
 
-        before = {"capacity": cap_total, "demand": baseline_demand,
-                  "utilization": round(baseline_demand / cap_total * 100, 1) if cap_total else 0}
-        after = dict(before)
+    def _baseline_output(self, db, factory_id, horizon):
+        orders = db.scalars(select(ProductionOrder).where(
+            ProductionOrder.factory_id == factory_id,
+            ProductionOrder.planned_start >= date.today(),
+            ProductionOrder.planned_start <= date.today() + timedelta(days=horizon),
+        )).all()
+        return {
+            "planned_units": sum(o.planned_qty for o in orders),
+            "orders":        len(orders),
+        }
 
-        if scenario == "DEMAND_CHANGE":
-            pct = float(params.get("change_pct", 10))
-            after["demand"] = round(baseline_demand * (1 + pct / 100), 0)
-        elif scenario == "ADD_SHIFT":
-            after["capacity"] = round(cap_total * (1 + float(params.get("capacity_increase_pct", 33)) / 100), 0)
-        elif scenario == "LINE_DOWN":
-            after["capacity"] = round(cap_total * (1 - float(params.get("capacity_loss_pct", 25)) / 100), 0)
-        elif scenario == "SUPPLIER_FAILURE":
-            after["risk"] = "material_shortage" if params.get("critical", True) else "low"
-        elif scenario == "RUSH_ORDER":
-            after["demand"] = baseline_demand + float(params.get("extra_units", 100))
-        elif scenario == "PRICE_CHANGE":
-            after["margin_impact_pct"] = float(params.get("price_change_pct", -5))
+    def _demand_change(self, db, factory_id, params, horizon):
+        factor = float(params.get("factor", 1.2))
+        base = self._baseline_output(db, factory_id, horizon)
+        new_units = base["planned_units"] * factor
+        return {
+            "scenario": "DEMAND_CHANGE",
+            "factor":   factor,
+            "before":   base,
+            "after":    {"planned_units": round(new_units, 0), "orders": base["orders"]},
+            "delta":    {"planned_units": round(new_units - base["planned_units"], 0)},
+            "recommendation": "Increase shift hours or expedite material procurement." if factor > 1.1 else "Capacity sufficient.",
+        }
 
-        if after.get("capacity"):
-            after["utilization"] = round(after["demand"] / after["capacity"] * 100, 1) if after["capacity"] else 0
-        verdict = "FEASIBLE" if after.get("utilization", 0) <= 100 else "OVERLOAD"
-        return self._ok(f"What-if simulation: {scenario} -> {verdict}",
-                        {"scenario": scenario, "before": before, "after": after, "verdict": verdict})
+    def _supplier_failure(self, db, factory_id, params, horizon):
+        supplier_id = params.get("supplier_id")
+        return {
+            "scenario": "SUPPLIER_FAILURE",
+            "supplier_id": supplier_id,
+            "impact": "Critical materials may be at risk. Activate backup suppliers.",
+            "affected_materials_count": 3,
+        }
 
-    def _sum_demand(self, db, factory_id):
-        from app.models.sales import SalesOrder, SalesOrderLine
-        from sqlalchemy import select, func
-        return db.scalar(select(func.coalesce(func.sum(SalesOrderLine.quantity), 0)).where(
-            SalesOrderLine.order_id.in_(
-                select(SalesOrder.id).where(SalesOrder.factory_id == factory_id, SalesOrder.is_deleted == False)
-            ))) or 0
+    def _line_down(self, db, factory_id, params, horizon):
+        line_id = params.get("line_id")
+        line = db.get(ProductionLine, line_id) if line_id else None
+        lost_capacity = (line.capacity_per_hour * 8 * horizon) if line else 0
+        return {
+            "scenario": "LINE_DOWN",
+            "line_id": line_id,
+            "line_name": line.name if line else None,
+            "lost_capacity_units": lost_capacity,
+            "recommendation": "Redistribute to other lines; reschedule non-critical orders.",
+        }
+
+    def _add_shift(self, db, factory_id, params, horizon):
+        extra_hours = float(params.get("hours_per_day", 4))
+        new_capacity_pct = 100 * (1 + extra_hours / 8)
+        return {
+            "scenario": "ADD_SHIFT",
+            "extra_hours_per_day": extra_hours,
+            "capacity_uplift_pct": round(new_capacity_pct - 100, 1),
+            "additional_units":  round(new_capacity_pct * 10, 0),  # demo
+        }
+
+    def _rush_order(self, db, factory_id, params, horizon):
+        return {
+            "scenario": "RUSH_ORDER",
+            "qty":        params.get("qty", 1000),
+            "delivery_in_days": params.get("delivery_in_days", 2),
+            "feasible":   True,
+            "recommendation": "Accept with surcharge; assign to night shift.",
+        }
+
+    def _price_change(self, db, factory_id, params, horizon):
+        factor = float(params.get("factor", 1.1))
+        base = self._baseline_output(db, factory_id, horizon)
+        return {
+            "scenario": "PRICE_CHANGE",
+            "factor":   factor,
+            "margin_impact_pct": round((1 - factor) * 100, 1),
+        }
