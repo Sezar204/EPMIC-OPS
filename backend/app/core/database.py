@@ -1,7 +1,7 @@
+Input
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from sqlalchemy.pool import StaticPool
-
 from app.core.config import settings
 
 
@@ -16,17 +16,15 @@ engine = create_engine(
     echo=settings.DEBUG,
 )
 
-try:
-    @event.listens_for(engine, "connect")
-    def set_pragmas(conn, _):
-        cur = conn.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA foreign_keys=ON")
-        cur.execute("PRAGMA synchronous=NORMAL")
-        cur.execute("PRAGMA cache_size=10000")
-        cur.close()
-except Exception:  # pragma: no cover
-    pass
+
+@event.listens_for(engine, "connect")
+def set_pragmas(conn, _):
+    cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA foreign_keys=ON")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    cur.execute("PRAGMA cache_size=10000")
+    cur.close()
 
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -53,6 +51,6 @@ def check_integrity() -> dict:
     try:
         with engine.connect() as c:
             r = c.execute(text("PRAGMA integrity_check")).fetchone()
-            return {"status": "ok" if r and r[0] == "ok" else "corrupted", "issues": []}
-    except Exception as e:  # pragma: no cover
+            return {"status": "ok" if r[0] == "ok" else "corrupted", "issues": []}
+    except Exception as e:
         return {"status": "error", "issues": [str(e)]}
