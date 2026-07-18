@@ -1,167 +1,168 @@
-"""Excel import / template generation (openpyxl — no pandas dependency)."""
-from __future__ import annotations
-
+Input
 import io
+import logging
 from typing import Any
-
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+import pandas as pd
 
-from app.core.database import SessionLocal
-from app.core.crud import bulk_create
-from app.models.production import ProductionLine, Machine, Shift
-from app.models.product import Product
-from app.models.inventory import RawMaterial
-from app.models.procurement import Supplier
-from app.models.sales import Customer
-from app.models.warehouse import Warehouse
-from app.models.sales import SalesOrder
-from app.models.procurement import PurchaseOrder
+logger = logging.getLogger(__name__)
 
-# entity -> model + required fields + header aliases
-CONFIG: dict[str, dict[str, Any]] = {
+
+# Define headers + data-type hints + example rows per entity.
+# Keys are stable identifiers used by the import endpoint.
+ENTITY_TEMPLATES: dict[str, dict[str, Any]] = {
     "production_lines": {
-        "model": ProductionLine,
-        "required": ["code", "name", "capacity_per_hour"],
-        "example": {"code": "PL-NEW", "name": "New Line", "type": "discrete",
-                    "capacity_per_hour": 300, "capacity_unit": "units",
-                    "status": "active", "changeover_minutes": 15},
+        "headers": ["code", "name", "type", "capacity_per_hour",
+                    "capacity_unit", "status", "changeover_minutes", "notes"],
+        "types":   ["string", "string", "string", "number",
+                    "string", "string", "number", "string"],
+        "example": ["PL-01", "Packaging Line A", "discrete", 500,
+                    "pcs", "active", 30, "Primary line"],
     },
     "machines": {
-        "model": Machine,
-        "required": ["code", "name"],
-        "example": {"code": "MC-NEW", "name": "New Machine", "criticality": "medium",
-                    "status": "active"},
+        "headers": ["code", "name", "line_id", "type", "capacity",
+                    "capacity_unit", "criticality", "status", "notes"],
+        "types":   ["string", "string", "number", "string", "number",
+                    "string", "string", "string", "string"],
+        "example": ["M-01", "Filler A", 1, "filler", 1000,
+                    "pcs/h", "high", "active", ""],
     },
     "shifts": {
-        "model": Shift,
-        "required": ["name", "start_time", "end_time"],
-        "example": {"name": "Extra", "start_time": "05:00", "end_time": "13:00",
-                    "break_minutes": 30, "days_of_week": "1,2,3,4,5", "headcount": 12},
+        "headers": ["name", "start_time", "end_time", "break_minutes",
+                    "days_of_week", "headcount", "is_active"],
+        "types":   ["string", "string", "string", "number",
+                    "string", "number", "boolean"],
+        "example": ["Morning", "06:00", "14:00", 30, "1,2,3,4,5", 5, True],
     },
     "products": {
-        "model": Product,
-        "required": ["sku", "name", "unit_of_measure", "standard_cost", "selling_price"],
-        "example": {"sku": "PST-999", "name": "New Product", "category": "Snacks",
-                    "unit_of_measure": "pack", "standard_cost": 2.0, "selling_price": 3.5,
-                    "type": "finished"},
+        "headers": ["sku", "name", "category", "unit_of_measure",
+                    "standard_cost", "selling_price", "min_order_qty",
+                    "lead_time_days", "type"],
+        "types":   ["string", "string", "string", "string",
+                    "number", "number", "number", "number", "string"],
+        "example": ["SKU-001", "Bottle 500ml", "Beverage", "pcs",
+                    0.5, 1.25, 100, 3, "finished"],
     },
     "raw_materials": {
-        "model": RawMaterial,
-        "required": ["code", "name", "unit_of_measure", "standard_cost",
-                     "safety_stock_qty", "reorder_point_qty", "lead_time_days"],
-        "example": {"code": "RM-999", "name": "New Material", "category": "Ingredient",
-                    "unit_of_measure": "kg", "standard_cost": 1.0, "safety_stock_qty": 100,
-                    "reorder_point_qty": 60, "lead_time_days": 5},
+        "headers": ["code", "name", "category", "unit_of_measure",
+                    "standard_cost", "safety_stock_qty", "reorder_point_qty",
+                    "lead_time_days", "storage_conditions"],
+        "types":   ["string", "string", "string", "string",
+                    "number", "number", "number", "number", "string"],
+        "example": ["RM-001", "PET Resin", "Plastic", "kg",
+                    1.5, 100, 200, 7, "dry"],
     },
     "suppliers": {
-        "model": Supplier,
-        "required": ["code", "name"],
-        "example": {"code": "SUP-999", "name": "New Supplier", "rating": 4.0,
-                    "status": "active", "payment_terms_days": 30},
+        "headers": ["code", "name", "contact_name", "contact_email",
+                    "contact_phone", "payment_terms_days", "rating", "status"],
+        "types":   ["string", "string", "string", "string",
+                    "string", "number", "number", "string"],
+        "example": ["SUP-01", "Acme Resin Co", "John Smith",
+                    "j@acme.com", "+2012345678", 30, 4, "active"],
     },
     "customers": {
-        "model": Customer,
-        "required": ["code", "name", "type"],
-        "example": {"code": "CUST-999", "name": "New Customer", "type": "b2b",
-                    "priority": 3, "payment_terms_days": 30},
+        "headers": ["code", "name", "type", "priority",
+                    "credit_limit", "payment_terms_days",
+                    "contact_name", "contact_email", "contact_phone"],
+        "types":   ["string", "string", "string", "number",
+                    "number", "number", "string", "string", "string"],
+        "example": ["CUST-01", "Hypermarket Co", "b2b", 1,
+                    100000, 60, "Jane Doe", "jane@hm.com", "+20111222333"],
     },
     "warehouses": {
-        "model": Warehouse,
-        "required": ["code", "name", "type"],
-        "example": {"code": "WH-999", "name": "New Warehouse", "type": "general",
-                    "total_capacity": 1000, "capacity_unit": "sqm"},
-    },
-    "sales_orders": {
-        "model": SalesOrder,
-        "required": ["customer_id", "order_number", "required_delivery"],
-        "example": {"customer_id": 1, "order_number": "ORD-NEW", "status": "draft",
-                    "total_value": 0, "currency": "USD"},
-    },
-    "purchase_orders": {
-        "model": PurchaseOrder,
-        "required": ["supplier_id", "po_number", "expected_delivery"],
-        "example": {"supplier_id": 1, "po_number": "PO-NEW", "status": "planned",
-                    "total_value": 0, "currency": "USD"},
+        "headers": ["code", "name", "type", "total_capacity",
+                    "capacity_unit", "storage_conditions", "location"],
+        "types":   ["string", "string", "string", "number",
+                    "string", "string", "string"],
+        "example": ["WH-01", "Main Warehouse", "raw_material", 5000,
+                    "sqm", "ambient", "Cairo"],
     },
 }
 
-NUMERIC = (int, float)
-
 
 class DataImporter:
-    def import_and_validate(self, factory_id: int, entity: str, file_bytes: bytes) -> dict:
-        cfg = CONFIG.get(entity)
-        if not cfg:
-            return {"total": 0, "valid": 0, "errors": [{"row": 0, "message": "Unsupported entity"}], "preview": []}
-        model = cfg["model"]
-        required = cfg["required"]
-        cols = {c.name for c in model.__table__.columns}
-        wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
-        ws = wb.active
-        rows = list(ws.iter_rows(values_only=True))
-        if not rows:
-            return {"total": 0, "valid": 0, "errors": [{"row": 0, "message": "Empty file"}], "preview": []}
-        headers = [str(h).strip().lower().replace(" ", "_") if h else "" for h in rows[0]]
-        valid, errors, preview = 0, [], []
-        for i, row in enumerate(rows[1:], start=2):
-            record: dict[str, Any] = {}
-            ok = True
-            for h, v in zip(headers, row):
-                if not h or v is None or v == "":
-                    continue
-                if h in cols:
-                    col = model.__table__.columns[h]
-                    try:
-                        if isinstance(col.type, (Numeric := __import__("sqlalchemy").Numeric, __import__("sqlalchemy").Integer, __import__("sqlalchemy").Float)):
-                            v = float(v) if "." in str(v) or isinstance(v, float) else int(v)
-                        elif str(col.type).startswith("BOOLEAN"):
-                            v = bool(v)
-                    except Exception:
-                        errors.append({"row": i, "message": f"Invalid value for {h}"})
-                        ok = False
-                        break
-                    record[h] = v
-            if ok:
-                missing = [r for r in required if r not in record or record[r] in (None, "")]
-                if missing:
-                    errors.append({"row": i, "message": f"Missing required: {', '.join(missing)}"})
-                    continue
-                valid += 1
-                if len(preview) < 5:
-                    preview.append(record)
-            else:
-                continue
-        return {"total": len(rows) - 1, "valid": valid, "errors": errors[:50], "preview": preview}
-
-    def commit_import(self, factory_id: int, entity: str, valid_rows: list[dict]) -> dict:
-        cfg = CONFIG.get(entity)
-        if not cfg:
-            return {"imported": 0, "skipped": 0, "errors": ["Unsupported entity"]}
-        db = SessionLocal()
-        try:
-            imported = bulk_create(db, cfg["model"], valid_rows, factory_id=factory_id)
-            return {"imported": imported, "skipped": 0, "errors": []}
-        finally:
-            db.close()
-
     def generate_template(self, entity: str) -> bytes:
-        cfg = CONFIG.get(entity)
-        if not cfg:
-            raise ValueError("Unsupported entity")
-        model = cfg["model"]
+        tpl = ENTITY_TEMPLATES.get(entity)
+        if not tpl:
+            raise ValueError(f"Unknown entity: {entity}")
+
         wb = Workbook()
         ws = wb.active
-        ws.title = entity
-        cols = [c.name for c in model.__table__.columns if c.name not in ("id", "created_at", "updated_at", "is_deleted", "factory_id")]
-        ws.append(cols)
-        for c in range(1, len(cols) + 1):
-            cell = ws.cell(row=1, column=c)
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.fill = PatternFill("solid", fgColor="1E40AF")
-            cell.alignment = Alignment(horizontal="center")
-        example = cfg["example"]
-        ws.append([example.get(c, "") for c in cols])
-        out = io.BytesIO()
-        wb.save(out)
-        return out.getvalue()
+        ws.title = entity[:31]
+
+        bold       = Font(bold=True, color="FFFFFF")
+        blue_fill  = PatternFill("solid", fgColor="1E40AF")
+        italic     = Font(italic=True, color="64748B")
+        gray_fill  = PatternFill("solid", fgColor="F1F5F9")
+        center     = Alignment(horizontal="center")
+
+        ws.append(tpl["headers"])
+        for c in ws[1]:
+            c.font = bold; c.fill = blue_fill; c.alignment = center
+        ws.append(tpl["types"])
+        for c in ws[2]:
+            c.font = italic; c.fill = gray_fill; c.alignment = center
+        ws.append(tpl["example"])
+        for c in ws[3]:
+            c.fill = gray_fill
+
+        for col_idx, header in enumerate(tpl["headers"], 1):
+            ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = max(15, len(header) + 2)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def import_and_validate(self, file_bytes: bytes, entity: str) -> dict:
+        """Read an Excel/CSV upload and return a preview + validation result."""
+        tpl = ENTITY_TEMPLATES.get(entity)
+        if not tpl:
+            raise ValueError(f"Unknown entity: {entity}")
+
+        try:
+            if file_bytes[:2] == b"PK":
+                df = pd.read_excel(io.BytesIO(file_bytes), header=0)
+            else:
+                df = pd.read_csv(io.BytesIO(file_bytes), header=0)
+        except Exception as e:
+            return {"total": 0, "valid": 0, "errors": [{"row": 0, "field": "file", "message": str(e)}], "preview": [], "rows": []}
+
+        df.columns = [str(c).strip().lower() for c in df.columns]
+        expected = [h.lower() for h in tpl["headers"]]
+        missing  = [c for c in expected if c not in df.columns]
+        if missing:
+            return {"total": len(df), "valid": 0,
+                    "errors": [{"row": 0, "field": m, "message": f"Missing column: {m}"} for m in missing],
+                    "preview": df.head(20).fillna("").to_dict(orient="records"), "rows": []}
+
+        rows = df.fillna("").to_dict(orient="records")
+        valid_rows: list = []
+        errors:     list = []
+        for i, row in enumerate(rows, start=2):
+            errs = self._validate_row(row, tpl, i)
+            if errs:
+                errors.extend(errs)
+            else:
+                valid_rows.append(row)
+
+        return {
+            "total":  len(rows),
+            "valid":  len(valid_rows),
+            "errors": errors,
+            "preview": rows[:20],
+            "rows":    valid_rows,
+        }
+
+    def _validate_row(self, row: dict, tpl: dict, row_num: int) -> list:
+        errs = []
+        for header, dtype in zip(tpl["headers"], tpl["types"]):
+            v = row.get(header.lower(), "")
+            if dtype in ("number",) and v != "" and v is not None:
+                try:
+                    float(v)
+                except (TypeError, ValueError):
+                    errs.append({"row": row_num, "field": header, "message": f"Not a number: {v!r}"})
+            if header in ("code", "name", "sku") and (v is None or v == ""):
+                errs.append({"row": row_num, "field": header, "message": "Required field is empty"})
+        return errs
