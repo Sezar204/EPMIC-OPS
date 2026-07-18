@@ -1,24 +1,25 @@
-import datetime as dt
-
-from sqlalchemy import String, Integer, Float, Boolean, Text, ForeignKey, DateTime
+Input
+from datetime import date
+from typing import Optional
+from sqlalchemy import String, Integer, Float, Date, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
+from app.models.base import Base, TimestampMixin, SoftDeleteMixin
 
-from app.core.database import Base
 
-
-class ProductCost(Base):
+class ProductCost(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "product_costs"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    factory_id: Mapped[int] = mapped_column(ForeignKey("factories.id", ondelete="CASCADE"), index=True)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
-    period_label: Mapped[str] = mapped_column(String(20), index=True)
-    std_material_cost: Mapped[float] = mapped_column(Float, default=0)
-    act_material_cost: Mapped[float] = mapped_column(Float, default=0)
-    std_labor_cost: Mapped[float] = mapped_column(Float, default=0)
-    act_labor_cost: Mapped[float] = mapped_column(Float, default=0)
-    std_overhead_cost: Mapped[float] = mapped_column(Float, default=0)
-    act_overhead_cost: Mapped[float] = mapped_column(Float, default=0)
-    std_total: Mapped[float] = mapped_column(Float, default=0)
-    act_total: Mapped[float] = mapped_column(Float, default=0)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    factory_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    product_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    period_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    std_material_cost: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    act_material_cost: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    std_labor_cost: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    act_labor_cost: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    std_overhead_cost: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    act_overhead_cost: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    std_total_cost: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    act_total_cost: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    revenue: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
