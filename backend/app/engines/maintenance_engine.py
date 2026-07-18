@@ -1,37 +1,57 @@
-from datetime import timedelta
-
-from sqlalchemy import select, func
-
-from app.engines.base import BaseEngine
-from app.models.maintenance import MaintenanceSchedule, MaintenanceWorkOrder, MachineBreakdown
+Input
+"""Maintenance engine — recalculates MTBF, MTTR, updates PM next-due dates."""
+from datetime import date, timedelta
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from app.engines import BaseEngine, EngineResult
+from app.models import (
+    MaintenanceSchedule, MaintenanceWorkOrder, MachineBreakdown, Machine,
+)
 
 
 class MaintenanceEngine(BaseEngine):
-    name = "maintenance_engine"
+    name = "maintenance"
 
-    def execute(self, db, factory_id: int):
-        now = __import__("datetime").datetime.utcnow()
-        wos = db.scalars(select(MaintenanceWorkOrder).where(
-            MaintenanceWorkOrder.factory_id == factory_id)).all()
-        breakdowns = db.scalars(select(MachineBreakdown).where(
-            MachineBreakdown.factory_id == factory_id)).all()
-        total_runtime = 30 * 24  # assume 30-day window
-        total_breakdowns = len(breakdowns)
-        total_dt = sum(w.downtime_hours for w in wos)
-        mtbf = round(total_runtime / total_breakdowns, 1) if total_breakdowns else 999
-        mttr = round(total_dt / total_breakdowns, 1) if total_breakdowns else 0
-        availability = round(100 - (total_dt / (total_runtime) * 100), 1) if total_runtime else 100
-        # update overdue schedules
-        overdue = 0
-        scheds = db.scalars(select(MaintenanceSchedule).where(
-            MaintenanceSchedule.factory_id == factory_id, MaintenanceSchedule.active == True)).all()
-        for s in scheds:
-            if s.next_due and s.next_due < now:
-                overdue += 1
-                if s.last_done:
-                    from datetime import timedelta as td
-                    s.next_due = s.last_done + td(days=s.frequency_days)
+    def _execute(self, db: Session, factory_id: int, r: EngineResult, **kwargs):
+        schedules = db.scalars(select(MaintenanceSchedule).where(
+            MaintenanceSchedule.factory_id == factory_id,
+            MaintenanceSchedule.is_active == 1,
+        )).all()
+        advanced = 0
+        for s in schedules:
+            completed = db.scalars(select(MaintenanceWorkOrder).where(
+                MaintenanceWorkOrder.machine_id == s.machine_id,
+                MaintenanceWorkOrder.status == "completed",
+                MaintenanceWorkOrder.completed_at >= s.last_done_date,
+            )).all()
+            if completed:
+                last = max(c.completed_at for c in completed if c.completed_at)
+                s.last_done_date = last.date()
+                s.next_due_date = last.date() + timedelta(days=s.frequency_days)
+                advanced += 1
+
+        # Auto-create PM work orders for overdue schedules
+        today = date.today()
+        new_wos = 0
+        for s in schedules:
+            if s.next_due_date and s.next_due_date <= today:
+                existing = db.scalars(select(MaintenanceWorkOrder).where(
+                    MaintenanceWorkOrder.machine_id == s.machine_id,
+                    MaintenanceWorkOrder.status.in_(["created", "assigned", "in_progress"]),
+                )).first()
+                if not existing:
+                    db.add(MaintenanceWorkOrder(
+                        factory_id=factory_id,
+                        machine_id=s.machine_id,
+                        wo_number=f"WO-PM-{date.today().strftime('%Y%m%d')}-{new_wos+1:03d}",
+                        type=s.type,
+                        status="created",
+                        priority="medium",
+                        description=f"PM auto-created: {s.description or 'preventive maintenance'}",
+                        downtime_hours=s.estimated_hours,
+                    ))
+                    new_wos += 1
+
+        r.items_processed = advanced + new_wos
+        r.notes.append(f"Advanced {advanced} PM schedules; created {new_wos} PM WOs")
         db.commit()
-        return self._ok("Maintenance metrics computed",
-                        {"mtbf": mtbf, "mttr": mttr, "availability": max(0, availability),
-                         "overdue_pm": overdue})
