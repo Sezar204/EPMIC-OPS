@@ -1,54 +1,59 @@
-import {
-  ResponsiveContainer, PieChart as RechartsPie, Pie, Cell,
-  Tooltip, Legend, type TooltipProps,
-} from "recharts"
+Input
+import { PieChart as RPieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from "recharts"
 
-interface PieDatum { name: string; value: number; color: string }
-interface PieChartProps {
-  data: PieDatum[]
-  height?: number
+export interface PieSlice {
+  name: string
+  value: number
+  color: string
 }
 
-export function PieChart({ data, height = 300 }: PieChartProps) {
+interface Props {
+  data: PieSlice[]
+  height?: number
+  showCenterTotal?: boolean
+}
+
+export function PieChart({ data, height = 300, showCenterTotal = true }: Props) {
   const total = data.reduce((a, d) => a + d.value, 0)
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <RechartsPie>
+      <RPieChart>
         <Pie
           data={data}
-          dataKey="value"
-          nameKey="name"
           cx="50%"
           cy="50%"
-          innerRadius={60}
+          innerRadius={showCenterTotal ? 60 : 0}
           outerRadius={90}
           paddingAngle={2}
-          isAnimationActive={false}
+          dataKey="value"
+          label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}
+          labelLine={false}
         >
-          {data.map((d, i) => (
-            <Cell key={i} fill={d.color} />
+          {data.map((entry, i) => (
+            <Cell key={`c-${i}`} fill={entry.color} />
           ))}
         </Pie>
-        <Tooltip content={<ChartTooltip />} />
+        {showCenterTotal && (
+          <text
+            x="50%"
+            y="50%"
+            textAnchor="middle"
+            dominantBaseline="middle"
+            className="fill-slate-900"
+          >
+            <tspan x="50%" dy="-0.4em" fontSize="11" fill="#64748B">Total</tspan>
+            <tspan x="50%" dy="1.4em" fontSize="20" fontWeight="700" fill="#0F172A">
+              {total.toLocaleString()}
+            </tspan>
+          </text>
+        )}
+        <Tooltip
+          contentStyle={{ backgroundColor: "#0F172A", border: "none", borderRadius: 6, fontSize: 12, color: "#fff" }}
+        />
         <Legend wrapperStyle={{ fontSize: 12 }} />
-        <text x="50%" y="46%" textAnchor="middle" dominantBaseline="middle" className="fill-slate-900 text-2xl font-bold">
-          {total}
-        </text>
-        <text x="50%" y="56%" textAnchor="middle" dominantBaseline="middle" className="fill-slate-400 text-xs">
-          Total
-        </text>
-      </RechartsPie>
+      </RPieChart>
     </ResponsiveContainer>
   )
 }
 
-function ChartTooltip({ active, payload }: TooltipProps<number, string>) {
-  if (!active || !payload?.length) return null
-  const p = payload[0]
-  return (
-    <div className="bg-white border border-border rounded-lg shadow-md p-2 text-xs">
-      <p className="font-semibold text-slate-800">{p.name}</p>
-      <p className="text-slate-600">Value: <span className="font-medium text-slate-900">{p.value}</span></p>
-    </div>
-  )
-}
+export default PieChart
