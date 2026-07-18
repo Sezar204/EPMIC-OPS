@@ -1,71 +1,148 @@
-from datetime import timedelta
-
-from sqlalchemy import select, func
-
-from app.engines.base import BaseEngine
-from app.models.inventory import RawMaterial, InventoryRawMaterial
-from app.models.procurement import PurchaseOrder
-from app.models.quality import QualityCheck
-from app.models.alert import Alert
-from app.models.maintenance import MaintenanceWorkOrder, MaintenanceSchedule
+Input
+"""Alert engine — scans all modules and raises alerts for threshold breaches."""
+from datetime import date, datetime, timedelta
+from typing import Optional
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from app.engines import BaseEngine, EngineResult
+from app.models import (
+    Alert, InventoryRawMaterial, RawMaterial, Machine, ProductionOrder,
+    SalesOrder, MaintenanceSchedule, AttendanceRecord, QualityCheck,
+)
 
 
 class AlertEngine(BaseEngine):
-    name = "alert_engine"
+    name = "alert"
 
-    def execute(self, db, factory_id: int):
-        return self.run(db, factory_id)
-
-    def run(self, db, factory_id: int):
-        created = 0
-        # inventory coverage
-        materials = db.scalars(select(RawMaterial).where(
-            RawMaterial.factory_id == factory_id, RawMaterial.is_deleted == False)).all()
-        for rm in materials:
-            inv = db.scalars(select(InventoryRawMaterial).where(InventoryRawMaterial.material_id == rm.id)).first()
-            on_hand = inv.qty_on_hand if inv else 0
-            if on_hand < rm.safety_stock_qty:
-                sev = "emergency" if on_hand == 0 else "critical"
-                if not self._exists(db, factory_id, "low_stock", rm.id):
-                    db.add(Alert(factory_id=factory_id, alert_type="low_stock", severity=sev,
-                                 title=f"{rm.name} below safety stock",
-                                 message=f"On hand {on_hand} vs safety {rm.safety_stock_qty}.",
-                                 source_module="inventory", source_id=rm.id))
-                    created += 1
-        # overdue purchase orders
-        today = __import__("datetime").datetime.utcnow()
-        pos = db.scalars(select(PurchaseOrder).where(
-            PurchaseOrder.factory_id == factory_id, PurchaseOrder.status.in_(["issued", "in_transit", "confirmed"]),
-            PurchaseOrder.expected_delivery < today)).all()
-        for po in pos:
-            if not self._exists(db, factory_id, "delivery", po.id):
-                db.add(Alert(factory_id=factory_id, alert_type="delivery", severity="warning",
-                             title=f"Purchase order {po.po_number} overdue",
-                             message="Expected delivery passed.", source_module="procurement", source_id=po.id))
-                created += 1
-        # overdue PM
-        scheds = db.scalars(select(MaintenanceSchedule).where(
-            MaintenanceSchedule.factory_id == factory_id, MaintenanceSchedule.next_due < today)).all()
-        for s in scheds:
-            if not self._exists(db, factory_id, "maintenance", s.id):
-                db.add(Alert(factory_id=factory_id, alert_type="maintenance", severity="warning",
-                             title="Preventive maintenance overdue", source_module="maintenance",
-                             source_id=s.machine_id, message="Scheduled PM is past due."))
-                created += 1
-        # recent quality failures
-        qc = db.scalars(select(QualityCheck).where(
-            QualityCheck.factory_id == factory_id, QualityCheck.status == "failed",
-            QualityCheck.checked_at >= today - timedelta(days=7))).all()
-        for q in qc:
-            if not self._exists(db, factory_id, "quality", q.id):
-                db.add(Alert(factory_id=factory_id, alert_type="quality", severity="critical",
-                             title="Quality check failed", source_module="quality", source_id=q.id,
-                             message=f"Defect rate {q.defect_rate_pct}%."))
-                created += 1
+    def _execute(self, db: Session, factory_id: int, r: EngineResult, **kwargs):
+        r.items_processed += self._check_inventory(db, factory_id)
+        r.items_processed += self._check_machines(db, factory_id)
+        r.items_processed += self._check_production(db, factory_id)
+        r.items_processed += self._check_sales(db, factory_id)
+        r.items_processed += self._check_maintenance(db, factory_id)
+        r.items_processed += self._check_attendance(db, factory_id)
+        r.items_processed += self._check_quality(db, factory_id)
         db.commit()
-        return self._ok(f"Generated {created} alerts", {"created": created})
 
-    def _exists(self, db, fid, atype, sid):
-        return db.scalar(select(func.count()).select_from(Alert).where(
-            Alert.factory_id == fid, Alert.alert_type == atype, Alert.source_id == sid,
-            Alert.is_resolved == False)) > 0
+    # --- helpers ---
+    def _add(self, db, factory_id, alert_type, severity, title, message, source_id=None):
+        existing = db.scalars(select(Alert).where(
+            Alert.factory_id == factory_id,
+            Alert.alert_type == alert_type,
+            Alert.source_id == source_id,
+            Alert.is_resolved == False,  # noqa: E712
+        )).first()
+        if existing:
+            return 0
+        a = Alert(
+            factory_id=factory_id, alert_type=alert_type, severity=severity,
+            title=title, message=message, source_id=source_id,
+            source_module="alert_engine",
+        )
+        db.add(a)
+        return 1
+
+    def _check_inventory(self, db, factory_id) -> int:
+        count = 0
+        mats = {m.id: m for m in db.scalars(select(RawMaterial).where(
+            RawMaterial.factory_id == factory_id
+        )).all()}
+        for inv in db.scalars(select(InventoryRawMaterial).where(
+            InventoryRawMaterial.factory_id == factory_id
+        )).all():
+            mat = mats.get(inv.material_id)
+            if not mat: continue
+            if inv.qty_on_hand == 0:
+                count += self._add(db, factory_id, "inventory_depleted", "emergency",
+                                   f"Stock depleted: {mat.name}", f"Material {mat.code} is at 0 units.",
+                                   source_id=mat.id)
+            elif inv.qty_on_hand < mat.safety_stock_qty:
+                sev = "critical" if inv.qty_on_hand < mat.safety_stock_qty * 0.5 else "warning"
+                count += self._add(db, factory_id, "inventory_below_safety", sev,
+                                   f"Below safety stock: {mat.name}",
+                                   f"On hand {inv.qty_on_hand} < safety {mat.safety_stock_qty}.",
+                                   source_id=mat.id)
+        return count
+
+    def _check_machines(self, db, factory_id) -> int:
+        count = 0
+        for m in db.scalars(select(Machine).where(
+            Machine.factory_id == factory_id
+        )).all():
+            if m.status == "down":
+                count += self._add(db, factory_id, "machine_down", "critical",
+                                   f"Machine down: {m.name}", f"Machine {m.code} reported down.", source_id=m.id)
+            elif m.status == "maintenance":
+                count += self._add(db, factory_id, "machine_maintenance", "info",
+                                   f"Machine in maintenance: {m.name}", f"Machine {m.code} under maintenance.", source_id=m.id)
+        return count
+
+    def _check_production(self, db, factory_id) -> int:
+        count = 0
+        today = date.today()
+        late = db.scalars(select(ProductionOrder).where(
+            ProductionOrder.factory_id == factory_id,
+            ProductionOrder.planned_end < today,
+            ProductionOrder.status.in_(["planned", "in_progress"]),
+        )).all()
+        for o in late:
+            count += self._add(db, factory_id, "production_overdue", "warning",
+                               f"Production order overdue: {o.order_number}",
+                               f"Planned end {o.planned_end} passed; status={o.status}.",
+                               source_id=o.id)
+        return count
+
+    def _check_sales(self, db, factory_id) -> int:
+        count = 0
+        soon = date.today() + timedelta(days=3)
+        at_risk = db.scalars(select(SalesOrder).where(
+            SalesOrder.factory_id == factory_id,
+            SalesOrder.required_delivery <= soon,
+            SalesOrder.status.in_(["draft", "confirmed", "in_production"]),
+        )).all()
+        for so in at_risk:
+            count += self._add(db, factory_id, "sales_at_risk", "warning",
+                               f"Sales order at risk: {so.order_number}",
+                               f"Required delivery {so.required_delivery} approaching.", source_id=so.id)
+        return count
+
+    def _check_maintenance(self, db, factory_id) -> int:
+        count = 0
+        today = date.today()
+        for s in db.scalars(select(MaintenanceSchedule).where(
+            MaintenanceSchedule.factory_id == factory_id,
+            MaintenanceSchedule.is_active == 1,
+            MaintenanceSchedule.next_due_date < today,
+        )).all():
+            count += self._add(db, factory_id, "maintenance_overdue", "warning",
+                               f"PM overdue: machine {s.machine_id}",
+                               f"Next due {s.next_due_date} passed.", source_id=s.id)
+        return count
+
+    def _check_attendance(self, db, factory_id) -> int:
+        count = 0
+        cutoff = date.today() - timedelta(days=1)
+        absent = db.scalars(select(AttendanceRecord).where(
+            AttendanceRecord.factory_id == factory_id,
+            AttendanceRecord.attendance_date >= cutoff,
+            AttendanceRecord.status == "absent",
+        )).count()
+        if absent > 3:
+            count += self._add(db, factory_id, "attendance_high_absent", "warning",
+                               f"High absenteeism: {absent} workers absent",
+                               f"More than 3 workers absent on {cutoff}.")
+        return count
+
+    def _check_quality(self, db, factory_id) -> int:
+        count = 0
+        cutoff = datetime.utcnow() - timedelta(days=7)
+        for c in db.scalars(select(QualityCheck).where(
+            QualityCheck.factory_id == factory_id,
+            QualityCheck.checked_at >= cutoff,
+            QualityCheck.status == "failed",
+        )).all():
+            count += self._add(db, factory_id, "quality_failure", "critical",
+                               f"Quality check failed",
+                               f"{c.check_type.upper()} check failed — defect rate {c.defect_rate_pct}%.",
+                               source_id=c.id)
+        return count
