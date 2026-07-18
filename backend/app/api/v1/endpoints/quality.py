@@ -1,115 +1,83 @@
-from fastapi import APIRouter, Depends, Body
-from sqlalchemy import select, func
+quality.py
+Input
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-
 from app.core.database import get_db
-from app.core.crud import list_resources, create_resource, get_resource, update_resource, delete_resource, serialize
-from app.core.response import ok, fail
-from app.models.quality import QualityCheck, NonConformanceReport, CAPARecord
+from app.schemas import ok
+from app.schemas.quality import QualityCheckCreate, NCRCreate, CAPACreate
+from app.services.quality_maint_wf import QualityService
+from app.models import (
+    QualityCheck, NonConformanceReport, CAPARecord,
+)
 
 router = APIRouter()
 
 
-@router.get("/{factory_id}/quality/checks")
-def list_checks(factory_id: int, page: int = 1, page_size: int = 20,
-                check_type: str | None = None, status: str | None = None, db: Session = Depends(get_db)):
-    filters = {}
-    if check_type: filters["check_type"] = check_type
-    if status: filters["status"] = status
-    rows, total = list_resources(db, QualityCheck, factory_id, page=page, page_size=page_size,
-                                 filters=filters, order_by="checked_at")
-    return ok(rows, "OK", total=total, page=page, page_size=page_size)
+@router.get("/checks/{factory_id}")
+def list_checks(factory_id: int, db: Session = Depends(get_db)):
+    items = db.query(QualityCheck).filter(QualityCheck.factory_id == factory_id).all()
+    return ok([{
+        "id": i.id, "factory_id": i.factory_id, "check_type": i.check_type,
+        "status": i.status, "sample_size": i.sample_size, "defects_found": i.defects_found,
+        "defect_rate_pct": i.defect_rate_pct, "decision": i.decision,
+        "checked_at": i.checked_at.isoformat() if i.checked_at else None,
+        "product_id": i.product_id, "material_id": i.material_id,
+    } for i in items], total=len(items))
 
 
-@router.post("/{factory_id}/quality/checks")
-def create_check(factory_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
-    sample = int(data.get("sample_size", 0) or 0)
-    defects = int(data.get("defects_found", 0) or 0)
-    data["defect_rate_pct"] = round(defects / sample * 100, 2) if sample else 0
-    if "status" not in data:
-        data["status"] = "passed" if defects == 0 else ("failed" if data["defect_rate_pct"] > 5 else "passed")
-    obj = create_resource(db, QualityCheck, data, factory_id)
-    return ok(obj, "Check recorded")
+@router.post("/checks/{factory_id}")
+def create_check(factory_id: int, payload: QualityCheckCreate, db: Session = Depends(get_db)):
+    qc = QualityService.create_check(db, factory_id, payload)
+    return ok({"id": qc.id}, "Check recorded")
 
 
-@router.get("/{factory_id}/quality/checks/{rid}")
-def get_check(factory_id: int, rid: int, db: Session = Depends(get_db)):
-    obj = get_resource(db, QualityCheck, rid, factory_id)
-    return ok(obj) if obj else fail("Not found")
-
-
-@router.put("/{factory_id}/quality/checks/{rid}")
-def update_check(factory_id: int, rid: int, data: dict = Body(...), db: Session = Depends(get_db)):
-    obj = update_resource(db, QualityCheck, rid, data, factory_id)
-    return ok(obj, "Updated") if obj else fail("Not found")
-
-
-@router.delete("/{factory_id}/quality/checks/{rid}")
-def delete_check(factory_id: int, rid: int, db: Session = Depends(get_db)):
-    return ok(None, "Deleted") if delete_resource(db, QualityCheck, rid, factory_id) else fail("Not found")
-
-
-# ---- NCR ----
-@router.get("/{factory_id}/quality/ncr")
+@router.get("/ncr/{factory_id}")
 def list_ncr(factory_id: int, db: Session = Depends(get_db)):
-    rows, total = list_resources(db, NonConformanceReport, factory_id, order_by="opened_at")
-    return ok(rows, "OK", total=total)
+    items = db.query(NonConformanceReport).filter(NonConformanceReport.factory_id == factory_id).all()
+    return ok([{
+        "id": i.id, "factory_id": i.factory_id, "ncr_number": i.ncr_number,
+        "title": i.title, "severity": i.severity, "status": i.status,
+        "created_at": i.created_at.isoformat() if i.created_at else None,
+        "closed_at": i.closed_at.isoformat() if i.closed_at else None,
+    } for i in items], total=len(items))
 
 
-@router.post("/{factory_id}/quality/ncr")
-def create_ncr(factory_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
-    n = db.scalars(select(NonConformanceReport).where(NonConformanceReport.factory_id == factory_id)).all()
-    data["ncr_number"] = f"NCR-2026-{len(n) + 1:03d}"
-    obj = create_resource(db, NonConformanceReport, data, factory_id)
-    return ok(obj, "NCR created")
+@router.post("/ncr/{factory_id}")
+def create_ncr(factory_id: int, payload: NCRCreate, db: Session = Depends(get_db)):
+    from datetime import date
+    obj = NonConformanceReport(
+        factory_id=factory_id,
+        ncr_number=f"NCR-{date.today().strftime('%Y%m%d')}-{int(__import__('time').time())%10000:04d}",
+        **payload.model_dump(),
+    )
+    db.add(obj); db.commit()
+    return ok({"id": obj.id}, "NCR created")
 
 
-@router.get("/{factory_id}/quality/ncr/{rid}")
-def get_ncr(factory_id: int, rid: int, db: Session = Depends(get_db)):
-    obj = get_resource(db, NonConformanceReport, rid, factory_id)
-    return ok(obj) if obj else fail("Not found")
-
-
-@router.put("/{factory_id}/quality/ncr/{rid}")
-def update_ncr(factory_id: int, rid: int, data: dict = Body(...), db: Session = Depends(get_db)):
-    obj = update_resource(db, NonConformanceReport, rid, data, factory_id)
-    return ok(obj, "Updated") if obj else fail("Not found")
-
-
-# ---- CAPA ----
-@router.get("/{factory_id}/quality/capa")
+@router.get("/capa/{factory_id}")
 def list_capa(factory_id: int, db: Session = Depends(get_db)):
-    rows, total = list_resources(db, CAPARecord, factory_id, order_by="due_date")
-    return ok(rows, "OK", total=total)
+    items = db.query(CAPARecord).filter(CAPARecord.factory_id == factory_id).all()
+    return ok([{
+        "id": i.id, "factory_id": i.factory_id, "capa_number": i.capa_number,
+        "type": i.type, "description": i.description, "responsible_person": i.responsible_person,
+        "due_date": i.due_date.isoformat() if i.due_date else None,
+        "completed_at": i.completed_at.isoformat() if i.completed_at else None,
+        "status": i.status,
+    } for i in items], total=len(items))
 
 
-@router.post("/{factory_id}/quality/capa")
-def create_capa(factory_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
-    c = db.scalars(select(CAPARecord).where(CAPARecord.factory_id == factory_id)).all()
-    data["capa_number"] = f"CAPA-2026-{len(c) + 1:03d}"
-    obj = create_resource(db, CAPARecord, data, factory_id)
-    return ok(obj, "CAPA created")
+@router.post("/capa/{factory_id}")
+def create_capa(factory_id: int, payload: CAPACreate, db: Session = Depends(get_db)):
+    from datetime import date
+    obj = CAPARecord(
+        factory_id=factory_id,
+        capa_number=f"CAPA-{date.today().strftime('%Y%m%d')}-{int(__import__('time').time())%10000:04d}",
+        **payload.model_dump(),
+    )
+    db.add(obj); db.commit()
+    return ok({"id": obj.id}, "CAPA created")
 
 
-@router.get("/{factory_id}/quality/capa/{rid}")
-def get_capa(factory_id: int, rid: int, db: Session = Depends(get_db)):
-    obj = get_resource(db, CAPARecord, rid, factory_id)
-    return ok(obj) if obj else fail("Not found")
-
-
-@router.put("/{factory_id}/quality/capa/{rid}")
-def update_capa(factory_id: int, rid: int, data: dict = Body(...), db: Session = Depends(get_db)):
-    obj = update_resource(db, CAPARecord, rid, data, factory_id)
-    return ok(obj, "Updated") if obj else fail("Not found")
-
-
-@router.get("/{factory_id}/quality/metrics")
+@router.get("/metrics/{factory_id}")
 def metrics(factory_id: int, db: Session = Depends(get_db)):
-    total = db.scalar(select(func.count()).select_from(QualityCheck).where(QualityCheck.factory_id == factory_id)) or 0
-    failed = db.scalar(select(func.count()).select_from(QualityCheck).where(QualityCheck.factory_id == factory_id, QualityCheck.status == "failed")) or 0
-    closed_capa = db.scalar(select(func.count()).select_from(CAPARecord).where(CAPARecord.factory_id == factory_id, CAPARecord.status == "closed")) or 0
-    total_capa = db.scalar(select(func.count()).select_from(CAPARecord).where(CAPARecord.factory_id == factory_id)) or 0
-    defect_rate = round(failed / total * 100, 2) if total else 0
-    fpy = round((total - failed) / total * 100, 1) if total else 100
-    closure = round(closed_capa / total_capa * 100, 1) if total_capa else 100
-    return ok({"defect_rate": defect_rate, "fpy": fpy, "capa_closure": closure, "total_checks": total})
+    return ok(QualityService.metrics(db, factory_id))
