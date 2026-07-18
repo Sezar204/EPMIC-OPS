@@ -1,3 +1,4 @@
+Input
 import { useEffect, useState } from "react"
 import { useParams } from "react-router-dom"
 import * as Tabs from "@radix-ui/react-tabs"
@@ -13,3 +14,9 @@ import { Select } from "@/components/ui/Select"
 import { LineChart } from "@/components/charts"
 import { useAppStore } from "@/stores/appStore"
 import { PageSkeleton } from "@/components/ui/PageSkeleton"
+
+export default function SalesPlanning() {
+  const { factoryId } = useParams<{ factoryId: string }>()
+  const fid = Number(factoryId)
+  const { notify } = useAppStore()
+  const [tab, setTab] = useState("b2b")
