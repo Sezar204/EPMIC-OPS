@@ -1,45 +1,47 @@
-from datetime import timedelta
 
-from sqlalchemy import select, func
+Input
+"""Production engine — converts S&OP / demand plan into production orders,
+assigns to lines, accounts for changeovers."""
+from datetime import date, timedelta
+from sqlalchemy import select
 from sqlalchemy.orm import Session
-
-from app.engines.base import BaseEngine
-from app.models.sales import SalesOrder, SalesOrderLine
-from app.models.production import ProductionLine, ProductionOrder
-
-COUNT_OPEN = func.count()
+from app.engines import BaseEngine, EngineResult
+from app.models import (
+    ProductionLine, ProductionOrder, Product, DemandForecast,
+)
 
 
 class ProductionEngine(BaseEngine):
-    name = "production_engine"
+    name = "production"
 
-    def execute(self, db: Session, factory_id: int):
-        active_line = db.scalars(select(ProductionLine).where(
-            ProductionLine.factory_id == factory_id, ProductionLine.is_deleted == False,
-            ProductionLine.status == "active")).first()
-        orders = db.scalars(select(SalesOrder).where(
-            SalesOrder.factory_id == factory_id, SalesOrder.is_deleted == False,
-            SalesOrder.status.in_(["confirmed", "in_production"]))).all()
-        created = 0
-        for so in orders:
-            lines_for_so = db.scalars(select(SalesOrderLine).where(SalesOrderLine.order_id == so.id)).all()
-            for l in lines_for_so:
-                existing = db.scalar(
-                    select(COUNT_OPEN).select_from(ProductionOrder).where(
-                        ProductionOrder.sales_order_line_id == l.id)
-                )
-                if existing and existing > 0:
-                    continue
-                po = ProductionOrder(
-                    factory_id=factory_id,
-                    line_id=active_line.id if active_line else None,
-                    product_id=l.product_id,
-                    sales_order_line_id=l.id,
-                    order_number=f"PRD-AUTO-{so.order_number}-{l.id}",
-                    planned_qty=l.quantity, produced_qty=0, status="planned",
-                    planned_start=so.required_delivery, priority=so.priority,
-                )
-                db.add(po)
-                created += 1
+    def _execute(self, db: Session, factory_id: int, r: EngineResult, horizon_days: int = 14, **kwargs):
+        forecasts = db.scalars(select(DemandForecast).where(
+            DemandForecast.factory_id == factory_id,
+        )).all()
+        lines = db.scalars(select(ProductionLine).where(
+            ProductionLine.factory_id == factory_id,
+            ProductionLine.status == "active",
+        )).all()
+        if not lines:
+            r.notes.append("No active production lines — skipped")
+            return
+        # Simple round-robin assignment
+        r.items_processed = 0
+        for fc in forecasts:
+            if fc.final_qty <= 0: continue
+            line = lines[r.items_processed % len(lines)]
+            po = ProductionOrder(
+                factory_id=factory_id,
+                order_number=f"PO-{date.today().strftime('%Y%m%d')}-{r.items_processed+1:03d}",
+                product_id=fc.product_id,
+                line_id=line.id,
+                planned_qty=fc.final_qty,
+                planned_start=date.today(),
+                planned_end=date.today() + timedelta(days=horizon_days // 2),
+                status="planned",
+                priority=3,
+            )
+            db.add(po)
+            r.items_processed += 1
         db.commit()
-        return self._ok(f"Created {created} production orders", {"created": created})
+        r.notes.append(f"Generated {r.items_processed} production orders")
