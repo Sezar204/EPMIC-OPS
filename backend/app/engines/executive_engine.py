@@ -1,53 +1,66 @@
-from datetime import timedelta
-
-from sqlalchemy import select, func
-
-from app.engines.base import BaseEngine
-from app.engines.capacity_engine import CapacityEngine
-from app.engines.alert_engine import AlertEngine
+Input
+"""Executive engine — aggregates all engines and produces prioritized decisions."""
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from app.engines import BaseEngine, EngineResult
+from app.engines.alert_engine    import AlertEngine
+from app.engines.mrp_engine      import MRPEngine
 from app.engines.inventory_engine import InventoryEngine
-from app.models.alert import Alert, Decision
+from app.engines.demand_engine   import DemandEngine
+from app.engines.production_engine import ProductionEngine
+from app.engines.capacity_engine  import CapacityEngine
+from app.engines.procurement_engine import ProcurementEngine
+from app.engines.maintenance_engine import MaintenanceEngine
+from app.engines.quality_engine   import QualityEngine
+from app.engines.bottleneck_engine import BottleneckEngine
+from app.models import Decision, Alert
 
 
 class ExecutiveEngine(BaseEngine):
-    name = "executive_engine"
+    name = "executive"
 
-    def execute(self, db, factory_id: int):
-        decisions = []
-        # run supporting engines
-        cap = CapacityEngine().execute(db, factory_id)
-        inv = InventoryEngine().execute(db, factory_id)
-        AlertEngine().execute(db, factory_id)
+    def _execute(self, db: Session, factory_id: int, r: EngineResult, **kwargs):
+        runs = {
+            "alerts":      AlertEngine().run(db, factory_id),
+            "mrp":         MRPEngine().run(db, factory_id),
+            "inventory":   InventoryEngine().run(db, factory_id),
+            "demand":      DemandEngine().run(db, factory_id),
+            "production":  ProductionEngine().run(db, factory_id),
+            "capacity":    CapacityEngine().run(db, factory_id),
+            "procurement": ProcurementEngine().run(db, factory_id),
+            "maintenance": MaintenanceEngine().run(db, factory_id),
+            "quality":     QualityEngine().run(db, factory_id),
+            "bottleneck":  BottleneckEngine().run(db, factory_id),
+        }
+        r.data["engines"] = {k: {"success": v.success, "items": v.items_processed, "alerts": v.alerts_created} for k, v in runs.items()}
 
-        # bottleneck -> decision
-        bottlenecks = sorted(cap.data.get("lines", []), key=lambda x: x["utilization"], reverse=True)
-        if bottlenecks and bottlenecks[0]["utilization"] > 100:
-            d = self._make_decision(db, factory_id, "capacity", "Add shift to relieve bottleneck",
-                                    f"{bottlenecks[0]['line']} at {bottlenecks[0]['utilization']}% utilization.",
-                                    "Schedule night shift.", "high")
-            decisions.append(d)
-        # critical inventory
-        critical = [i for i in inv.data.get("items", []) if i["coverage_days"] < 3]
-        if critical:
-            d = self._make_decision(db, factory_id, "procurement", "Expedite critical material purchases",
-                                    f"{len(critical)} materials below 3 days coverage.",
-                                    "Issue emergency POs.", "urgent")
-            decisions.append(d)
-        # unresolved critical alerts
-        crit = db.scalar(select(func.count()).select_from(Alert).where(
-            Alert.factory_id == factory_id, Alert.is_resolved == False,
-            Alert.severity.in_(["critical", "emergency"]))) or 0
-        if crit:
-            d = self._make_decision(db, factory_id, "operations", "Resolve critical alerts",
-                                    f"{crit} critical alerts open.", "Triage by severity.", "urgent")
-            decisions.append(d)
+        # Build decision recommendations
+        alerts = db.scalars(select(Alert).where(
+            Alert.factory_id == factory_id,
+            Alert.is_resolved == False,  # noqa: E712
+        )).order_by(Alert.severity.desc(), Alert.created_at.desc()).limit(10).all()
+
+        for a in alerts:
+            existing = db.scalars(select(Decision).where(
+                Decision.factory_id == factory_id,
+                Decision.decision_type == a.alert_type,
+                Decision.status == "pending",
+            )).first()
+            if existing: continue
+            priority = "urgent" if a.severity == "emergency" else (
+                "high" if a.severity == "critical" else "medium"
+            )
+            db.add(Decision(
+                factory_id=factory_id,
+                decision_type=a.alert_type,
+                title=f"Address: {a.title}",
+                description=a.message,
+                recommendation=f"Investigate and resolve the {a.alert_type} alert.",
+                priority=priority,
+                status="pending",
+            ))
+            r.decisions_created += 1
+
+        r.items_processed = sum(v.items_processed for v in runs.values())
+        r.alerts_created   = sum(v.alerts_created for v in runs.values())
         db.commit()
-        return self._ok(f"Generated {len(decisions)} decisions",
-                        {"decisions": decisions, "bottlenecks": bottlenecks[:3]})
-
-    def _make_decision(self, db, fid, dtype, title, desc, rec, prio):
-        d = Decision(factory_id=fid, decision_type=dtype, title=title, description=desc,
-                     recommendation=rec, priority=prio, status="pending")
-        db.add(d)
-        db.flush()
-        return {"id": d.id, "title": title, "priority": prio}
