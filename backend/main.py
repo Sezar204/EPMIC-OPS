@@ -1,15 +1,14 @@
+Input
 import logging
 import sys
-
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from app.core.config import settings, LOG_DIR
 from app.core.database import init_db, check_integrity, SessionLocal
 from app.api.v1.router import api_router
 from app.utils.backup import BackupService
-from app.utils.scheduler import start_scheduler
+from app.utils.scheduler import start_scheduler, stop_scheduler
 from app.core.seeder import seed_demo_data
 
 log_file = LOG_DIR / "emicp.log"
@@ -34,15 +33,21 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         seed_demo_data(db)
+    except Exception as e:
+        logger.exception(f"Seed failed: {e}")
     finally:
         db.close()
-    start_scheduler()
+    try:
+        start_scheduler()
+    except Exception as e:
+        logger.exception(f"Scheduler failed to start: {e}")
     logger.info("EMICP ready.")
     yield
     logger.info("EMICP shutting down...")
     try:
+        stop_scheduler()
         BackupService().create_backup("auto")
-    except Exception as e:  # pragma: no cover
+    except Exception as e:
         logger.error(f"Shutdown backup failed: {e}")
     logger.info("EMICP stopped.")
 
