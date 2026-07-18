@@ -1,67 +1,95 @@
+Input
 import { useEffect, useState } from "react"
-import { Factory, Minus, Square, X } from "lucide-react"
+import { Factory, Minus, Square, X, Maximize2 } from "lucide-react"
+import { APP_NAME } from "@/constants"
 import { useAppStore } from "@/stores/appStore"
+import { cn } from "@/utils/cn"
 
 export function TitleBar() {
-  const currentFactory = useAppStore((s) => s.currentFactory)
-  const [windowApi, setWindowApi] = useState<any>(null)
+  const factory = useAppStore((s) => s.currentFactory)
+  const [isMaximized, setIsMaximized] = useState(false)
+
+  const win = async () => {
+    try {
+      const mod = await import("@tauri-apps/api/window")
+      const w   = mod.getCurrentWindow()
+      return { w, mod }
+    } catch {
+      return null
+    }
+  }
+
+  const handleMinimize = async () => {
+    const h = await win()
+    if (h) await h.w.minimize()
+  }
+  const handleMaximize = async () => {
+    const h = await win()
+    if (h) {
+      const max = await h.w.isMaximized()
+      if (max) await h.w.unmaximize()
+      else await h.w.maximize()
+      setIsMaximized(!max)
+    }
+  }
+  const handleClose = async () => {
+    const h = await win()
+    if (h) await h.w.close()
+  }
 
   useEffect(() => {
-    (async () => {
-      try {
-        const mod = await import("@tauri-apps/api/window")
-        setWindowApi(mod.getCurrentWindow())
-      } catch {
-        // Browser dev mode — window API unavailable, controls hidden via no-op handlers
+    let mounted = true
+    ;(async () => {
+      const h = await win()
+      if (h && mounted) {
+        try { setIsMaximized(await h.w.isMaximized()) } catch { /* noop */ }
       }
     })()
+    return () => { mounted = false }
   }, [])
-
-  const minimize = async () => { try { await windowApi?.minimize() } catch {} }
-  const toggleMax = async () => { try { await windowApi?.toggleMaximize() } catch {} }
-  const close = async () => { try { await windowApi?.close() } catch {} }
 
   return (
     <div
       data-tauri-drag-region
-      className="h-10 flex items-center justify-between bg-secondary px-3 border-b border-slate-800 select-none shrink-0"
+      className="h-10 bg-slate-900 text-white flex items-center justify-between px-4 select-none border-b border-slate-800 flex-shrink-0"
     >
-      <div className="flex items-center gap-2" data-tauri-drag-region>
-        <div className="w-6 h-6 rounded bg-primary flex items-center justify-center">
-          <Factory className="w-3.5 h-3.5 text-white" />
+      <div className="flex items-center gap-2 text-sm font-medium">
+        <div className="w-6 h-6 bg-primary rounded-md flex items-center justify-center">
+          <Factory className="w-3.5 h-3.5 text-white" strokeWidth={2.5} />
         </div>
-        <span className="text-white font-semibold text-sm">EMICP</span>
-        {currentFactory && (
+        <span className="font-semibold">{APP_NAME}</span>
+        {factory && (
           <>
             <span className="text-slate-500">—</span>
-            <span className="text-slate-300 text-sm">{currentFactory.name}</span>
+            <span className="text-slate-300">{factory.name}</span>
           </>
         )}
       </div>
-
-      <div className="flex items-center">
+      <div className="flex items-center gap-1" data-tauri-drag-region={undefined as unknown as undefined}>
         <button
-          onClick={minimize}
-          className="w-10 h-10 flex items-center justify-center text-slate-400 hover:bg-slate-800 hover:text-white transition"
-          title="Minimize"
+          onClick={handleMinimize}
+          className="w-9 h-9 flex items-center justify-center hover:bg-slate-800 rounded transition-colors"
+          aria-label="Minimize"
         >
-          <Minus className="w-4 h-4" />
+          <Minus className="w-3.5 h-3.5" />
         </button>
         <button
-          onClick={toggleMax}
-          className="w-10 h-10 flex items-center justify-center text-slate-400 hover:bg-slate-800 hover:text-white transition"
-          title="Maximize"
+          onClick={handleMaximize}
+          className="w-9 h-9 flex items-center justify-center hover:bg-slate-800 rounded transition-colors"
+          aria-label="Maximize"
         >
-          <Square className="w-3.5 h-3.5" />
+          {isMaximized ? <Square className="w-3 h-3" /> : <Maximize2 className="w-3.5 h-3.5" />}
         </button>
         <button
-          onClick={close}
-          className="w-10 h-10 flex items-center justify-center text-slate-400 hover:bg-danger hover:text-white transition"
-          title="Close"
+          onClick={handleClose}
+          className="w-9 h-9 flex items-center justify-center hover:bg-red-600 rounded transition-colors"
+          aria-label="Close"
         >
-          <X className="w-4 h-4" />
+          <X className="w-3.5 h-3.5" />
         </button>
       </div>
     </div>
   )
 }
+
+export default TitleBar
