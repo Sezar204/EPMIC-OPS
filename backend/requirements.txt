@@ -1,0 +1,16 @@
+# EMICP Desktop Edition — backend dependencies
+# NOTE: Pinned to versions verified working on Python 3.12 / 3.13.
+# (The original spec named pandas==3.0.0 / numpy==2.5.0 / python==3.14 which are
+#  not yet stable; Excel I/O uses openpyxl directly, so pandas/numpy are dropped.)
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+sqlalchemy==2.0.36
+alembic==1.13.3
+pydantic==2.9.2
+pydantic-settings==2.5.2
+openpyxl==3.1.5
+python-multipart==0.0.12
+aiofiles==24.1.0
+apscheduler==3.10.4
+python-docx==1.1.2
+pyinstaller==6.15.0
