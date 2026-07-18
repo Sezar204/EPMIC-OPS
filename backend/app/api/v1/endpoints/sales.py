@@ -1,208 +1,122 @@
-from datetime import timedelta
-
-from fastapi import APIRouter, Depends, Body
-from sqlalchemy import select, func
+Input
+from datetime import date
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-
 from app.core.database import get_db
-from app.core.crud import serialize
-from app.core.response import ok, fail
-from app.models.sales import SalesOrder, SalesOrderLine, Customer, DemandForecast
-from app.models.product import Product, BOMLine, BOMHeader
-from app.models.inventory import InventoryRawMaterial, RawMaterial
+from app.schemas import ok
+from app.schemas.sales import SalesOrderCreate, SalesOrderUpdate
+from app.services.operations import SalesService
+from app.repositories.modules import SalesOrderRepo, CustomerRepo
+from app.models import SalesOrder, SalesOrderLine
 
 router = APIRouter()
 
 
-def _order_view(o: SalesOrder, db: Session) -> dict:
-    row = serialize(o)
-    cust = db.get(Customer, o.customer_id)
-    lines = db.scalars(select(SalesOrderLine).where(SalesOrderLine.order_id == o.id)).all()
-    row["customer_name"] = cust.name if cust else "-"
-    row["lines_count"] = len(lines)
-    row["lines"] = [serialize(l) for l in lines]
-    return row
+@router.get("/orders/{factory_id}")
+def list_orders(factory_id: int, db: Session = Depends(get_db)):
+    items = db.query(SalesOrder).filter(SalesOrder.factory_id == factory_id).all()
+    return ok([{
+        "id": i.id, "factory_id": i.factory_id, "customer_id": i.customer_id,
+        "order_number": i.order_number, "order_date": i.order_date.isoformat(),
+        "required_delivery": i.required_delivery.isoformat(),
+        "status": i.status, "total_value": i.total_value, "currency": i.currency,
+        "is_rush_order": i.is_rush_order, "priority": i.priority,
+    } for i in items], total=len(items))
 
 
-@router.get("/{factory_id}/sales/orders")
-def list_orders(factory_id: int, page: int = 1, page_size: int = 20, search: str | None = None,
-                status: str | None = None, db: Session = Depends(get_db)):
-    from app.core.crud import list_resources
-    filters = {"status": status} if status else None
-    rows, total = list_resources(db, SalesOrder, factory_id, page=page, page_size=page_size,
-                                 search=search, search_fields=["order_number"], filters=filters, order_by="order_date")
-    rows = [_order_view(db.get(SalesOrder, r["id"]), db) for r in rows]
-    return ok(rows, "OK", total=total, page=page, page_size=page_size)
-
-
-@router.post("/{factory_id}/sales/orders")
-def create_order(factory_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
-    lines = data.pop("lines", [])
-    total = 0.0
-    order = SalesOrder(factory_id=factory_id, customer_id=data["customer_id"],
-                       order_number=data.get("order_number"), order_date=data.get("order_date"),
-                       required_delivery=data.get("required_delivery"), status=data.get("status", "draft"),
-                       currency=data.get("currency", "USD"), is_rush_order=data.get("is_rush_order", False),
-                       priority=data.get("priority", 3), notes=data.get("notes"))
-    db.add(order)
-    db.flush()
-    for l in lines:
-        lt = float(l.get("unit_price", 0))
-        qty = float(l.get("quantity", 0))
-        disc = float(l.get("discount_pct", 0))
-        line_total = qty * lt * (1 - disc / 100)
-        total += line_total
-        db.add(SalesOrderLine(order_id=order.id, product_id=l["product_id"], quantity=qty,
-                              unit_price=lt, discount_pct=disc, line_total=line_total,
-                              required_date=l.get("required_date"), status="open"))
-    order.total_value = round(total, 2)
-    db.commit()
-    return ok(_order_view(order, db), "Order created")
-
-
-@router.get("/{factory_id}/sales/orders/{rid}")
-def get_order(factory_id: int, rid: int, db: Session = Depends(get_db)):
-    o = db.get(SalesOrder, rid)
-    if not o or o.factory_id != factory_id:
-        return fail("Not found")
-    return ok(_order_view(o, db))
-
-
-@router.put("/{factory_id}/sales/orders/{rid}")
-def update_order(factory_id: int, rid: int, data: dict = Body(...), db: Session = Depends(get_db)):
-    o = db.get(SalesOrder, rid)
-    if not o or o.factory_id != factory_id:
-        return fail("Not found")
-    for k, v in data.items():
-        if k in ("lines", "id", "factory_id"):
-            continue
-        setattr(o, k, v)
-    if "lines" in data:
-        db.query(SalesOrderLine).where(SalesOrderLine.order_id == rid).delete()
-        for l in data["lines"]:
-            lt = float(l.get("unit_price", 0))
-            qty = float(l.get("quantity", 0))
-            disc = float(l.get("discount_pct", 0))
-            db.add(SalesOrderLine(order_id=rid, product_id=l["product_id"], quantity=qty,
-                                  unit_price=lt, discount_pct=disc,
-                                  line_total=qty * lt * (1 - disc / 100),
-                                  required_date=l.get("required_date"), status="open"))
-    db.commit()
-    return ok(_order_view(o, db), "Updated")
-
-
-@router.delete("/{factory_id}/sales/orders/{rid}")
-def delete_order(factory_id: int, rid: int, db: Session = Depends(get_db)):
-    o = db.get(SalesOrder, rid)
-    if not o or o.factory_id != factory_id:
-        return fail("Not found")
-    o.is_deleted = True
-    db.commit()
-    return ok(None, "Deleted")
-
-
-@router.post("/{factory_id}/sales/orders/{rid}/ctp-analysis")
-def ctp_analysis(factory_id: int, rid: int, db: Session = Depends(get_db)):
-    o = db.get(SalesOrder, rid)
-    if not o:
-        return fail("Not found")
-    lines = db.scalars(select(SalesOrderLine).where(SalesOrderLine.order_id == o.id)).all()
-    # explode materials
-    required: dict[int, float] = {}
-    margin = 0.0
-    for l in lines:
-        prod = db.get(Product, l.product_id)
-        if prod:
-            margin += (prod.selling_price - prod.standard_cost) * l.quantity
-        bom_lines = db.scalars(select(BOMLine).join(BOMHeader, BOMLine.bom_id == BOMHeader.id).where(BOMHeader.product_id == l.product_id)).all()
-        for bl in bom_lines:
-            required[bl.material_id] = required.get(bl.material_id, 0) + l.quantity * bl.quantity_required
-    bottlenecks = []
-    can_commit = True
-    committed = o.order_date
-    for mid, qty in required.items():
-        inv = db.scalars(select(InventoryRawMaterial).where(InventoryRawMaterial.material_id == mid)).first()
-        available = inv.qty_available if inv else 0
-        rm = db.get(RawMaterial, mid)
-        if available < qty:
-            can_commit = False
-            if rm:
-                bottlenecks.append(f"{rm.name}: short {round(qty - available, 1)} {rm.unit_of_measure}")
-            # delay by lead time
-            if rm:
-                committed = max(committed, o.order_date + timedelta(days=rm.lead_time_days))
-    risk = "green"
-    if not can_commit:
-        risk = "red"
-    elif bottlenecks:
-        risk = "yellow"
-    margin_pct = round(margin / max(o.total_value, 1) * 100, 1)
+@router.get("/orders/{factory_id}/{order_id}")
+def get_order(factory_id: int, order_id: int, db: Session = Depends(get_db)):
+    obj = SalesOrderRepo(db).get_with_lines(order_id)
+    if not obj or obj.factory_id != factory_id: raise HTTPException(404, "Order not found")
     return ok({
-        "can_commit": can_commit,
-        "committed_date": committed.isoformat() if hasattr(committed, "isoformat") else str(committed),
-        "earliest_date": (o.order_date + timedelta(days=1)).isoformat(),
-        "bottlenecks": bottlenecks,
-        "margin_pct": margin_pct,
-        "risk": risk,
+        "id": obj.id, "factory_id": obj.factory_id, "customer_id": obj.customer_id,
+        "order_number": obj.order_number, "order_date": obj.order_date.isoformat(),
+        "required_delivery": obj.required_delivery.isoformat(),
+        "status": obj.status, "total_value": obj.total_value, "currency": obj.currency,
+        "is_rush_order": obj.is_rush_order, "priority": obj.priority,
+        "lines": [{
+            "id": l.id, "product_id": l.product_id, "quantity": l.quantity,
+            "unit_price": l.unit_price, "line_total": l.line_total,
+        } for l in (obj.lines or [])],
     })
 
 
-# ---- Forecasts ----
-@router.get("/{factory_id}/sales/forecasts")
-def list_forecasts(factory_id: int, period_type: str = "monthly", db: Session = Depends(get_db)):
-    rows = db.scalars(select(DemandForecast).where(
-        DemandForecast.factory_id == factory_id, DemandForecast.period_type == period_type
-    ).order_by(DemandForecast.period_label)).all()
-    return ok([serialize(r) for r in rows])
-
-
-@router.post("/{factory_id}/sales/forecasts")
-def upsert_forecast(factory_id: int, data: dict = Body(...), db: Session = Depends(get_db)):
-    prod_id = data["product_id"]
-    plabel = data["period_label"]
-    existing = db.scalar(select(DemandForecast).where(
-        DemandForecast.factory_id == factory_id, DemandForecast.product_id == prod_id,
-        DemandForecast.period_label == plabel))
-    if existing:
-        existing.manual_forecast = data.get("manual_forecast")
-        existing.final_forecast = data.get("manual_forecast", existing.final_forecast)
-    else:
-        db.add(DemandForecast(factory_id=factory_id, product_id=prod_id,
-                              period_type=data.get("period_type", "monthly"),
-                              period_label=plabel, historical=data.get("historical", 0),
-                              system_forecast=data.get("system_forecast", 0),
-                              manual_forecast=data.get("manual_forecast"),
-                              final_forecast=data.get("manual_forecast", data.get("system_forecast", 0))))
+@router.post("/orders/{factory_id}")
+def create_order(factory_id: int, payload: SalesOrderCreate, db: Session = Depends(get_db)):
+    data = payload.model_dump()
+    lines = data.pop("lines", [])
+    obj = SalesOrder(factory_id=factory_id, total_value=0, **data)
+    db.add(obj); db.flush()
+    total = 0
+    for ln in lines:
+        ln_total = ln["quantity"] * ln["unit_price"] * (1 - ln.get("discount_pct", 0) / 100)
+        db.add(SalesOrderLine(order_id=obj.id, line_total=ln_total, **ln))
+        total += ln_total
+    obj.total_value = total
     db.commit()
-    return ok(None, "Forecast saved")
+    return ok({"id": obj.id}, "Order created")
 
 
-@router.get("/{factory_id}/sales/sop")
+@router.put("/orders/{factory_id}/{order_id}")
+def update_order(factory_id: int, order_id: int, payload: SalesOrderUpdate, db: Session = Depends(get_db)):
+    obj = SalesOrderRepo(db).get(order_id)
+    if not obj or obj.factory_id != factory_id: raise HTTPException(404, "Order not found")
+    for k, v in payload.model_dump(exclude_unset=True).items(): setattr(obj, k, v)
+    db.commit()
+    return ok(None, "Order updated")
+
+
+@router.delete("/orders/{factory_id}/{order_id}")
+def delete_order(factory_id: int, order_id: int, db: Session = Depends(get_db)):
+    ok_flag = SalesOrderRepo(db).delete(order_id, soft=True)
+    if not ok_flag: raise HTTPException(404, "Order not found")
+    db.commit()
+    return ok(None, "Order deleted")
+
+
+@router.post("/orders/{factory_id}/{order_id}/ctp-analysis")
+def ctp(factory_id: int, order_id: int, db: Session = Depends(get_db)):
+    return ok(SalesService.run_ctp(db, factory_id, order_id))
+
+
+@router.get("/forecasts/{factory_id}")
+def list_forecasts(factory_id: int, db: Session = Depends(get_db)):
+    from app.engines.demand_engine import DemandEngine
+    return ok(DemandEngine().forecast(db, factory_id))
+
+
+@router.post("/forecasts/{factory_id}")
+def save_forecasts(factory_id: int, payload: dict, db: Session = Depends(get_db)):
+    from app.models import DemandForecast
+    from sqlalchemy import select
+    for row in payload.get("items", []):
+        existing = db.scalars(select(DemandForecast).where(
+            DemandForecast.factory_id == factory_id,
+            DemandForecast.product_id == row["product_id"],
+            DemandForecast.period_date == row["period_date"],
+        )).first()
+        if existing:
+            existing.manual_adjusted_qty = row.get("manual_adjusted_qty")
+            existing.final_qty = row.get("manual_adjusted_qty") or existing.system_forecast_qty
+    db.commit()
+    return ok(None, "Forecasts saved")
+
+
+@router.get("/sop/{factory_id}")
 def sop(factory_id: int, db: Session = Depends(get_db)):
-    # Consolidated B2B demand + B2C forecast
-    b2b = db.scalars(select(SalesOrderLine).where(
-        SalesOrderLine.order_id.in_(
-            select(SalesOrder.id).where(SalesOrder.factory_id == factory_id, SalesOrder.is_deleted == False)
-        )
-    )).all()
-    demand: dict[int, float] = {}
-    for l in b2b:
-        demand[l.product_id] = demand.get(l.product_id, 0) + l.quantity
-
-    b2c = db.scalars(select(DemandForecast).where(
-        DemandForecast.factory_id == factory_id)).all()
-    fc: dict[int, float] = {}
-    for f in b2c:
-        fc[f.product_id] = fc.get(f.product_id, 0) + f.final_forecast
-
-    products = db.scalars(select(Product).where(Product.factory_id == factory_id, Product.is_deleted == False)).all()
-    rows = []
-    for p in products:
-        b = demand.get(p.id, 0)
-        c = round(fc.get(p.id, 0), 0)
-        total = b + c
-        # crude capacity check
-        rows.append({"product_id": p.id, "sku": p.sku, "name": p.name,
-                     "b2b_demand": b, "b2c_forecast": c, "total": total,
-                     "status": "BALANCED"})
-    return ok(rows)
+    from app.engines.executive_engine import ExecutiveEngine
+    from app.engines.demand_engine import DemandEngine
+    DemandEngine().run(db, factory_id)
+    forecasts = db.query(__import__('app.models', fromlist=['DemandForecast']).DemandForecast).filter_by(factory_id=factory_id).all()
+    products = {p.id: p for p in db.query(__import__('app.models', fromlist=['Product']).Product).filter_by(factory_id=factory_id).all()}
+    out = []
+    for f in forecasts:
+        p = products.get(f.product_id)
+        if not p: continue
+        out.append({
+            "product_id": p.id, "product_sku": p.sku, "product_name": p.name,
+            "b2b_demand": 0, "b2c_forecast": f.system_forecast_qty,
+            "total": f.final_qty, "capacity": 10000, "gap": 0,
+            "status": "BALANCED" if f.final_qty < 10000 else "GAP",
+        })
+    return ok(out)
