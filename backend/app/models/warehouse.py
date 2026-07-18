@@ -1,24 +1,20 @@
-import datetime as dt
-
-from sqlalchemy import String, Integer, Float, Boolean, Text, ForeignKey, DateTime
+Input
+from typing import Optional
+from sqlalchemy import String, Integer, Float, Text
 from sqlalchemy.orm import Mapped, mapped_column
+from app.models.base import Base, TimestampMixin, SoftDeleteMixin
 
-from app.core.database import Base
 
-
-class Warehouse(Base):
+class Warehouse(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "warehouses"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    factory_id: Mapped[int] = mapped_column(ForeignKey("factories.id", ondelete="CASCADE"), index=True)
-    code: Mapped[str] = mapped_column(String(40), index=True)
-    name: Mapped[str] = mapped_column(String(150))
-    type: Mapped[str] = mapped_column(String(20), default="general")
-    total_capacity: Mapped[float] = mapped_column(Float, default=0)
-    capacity_unit: Mapped[str] = mapped_column(String(20), default="sqm")
-    storage_conditions: Mapped[str | None] = mapped_column(String(120))
-    location: Mapped[str | None] = mapped_column(String(150))
-    notes: Mapped[str | None] = mapped_column(Text)
-    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    factory_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    type: Mapped[str] = mapped_column(String(16), default="general", nullable=False)
+    total_capacity: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    capacity_unit: Mapped[str] = mapped_column(String(16), default="sqm", nullable=False)
+    storage_conditions: Mapped[Optional[str]] = mapped_column(String(200))
+    location: Mapped[Optional[str]] = mapped_column(String(200))
+    notes: Mapped[Optional[str]] = mapped_column(Text)
