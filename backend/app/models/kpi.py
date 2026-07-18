@@ -1,41 +1,38 @@
-import datetime as dt
+Input
+from datetime import date
+from typing import Optional
+from sqlalchemy import String, Integer, Float, Date, DateTime, Text, ForeignKey, Boolean
+from sqlalchemy.orm import Mapped, mapped_column
+from app.models.base import Base, TimestampMixin, SoftDeleteMixin
 
-from sqlalchemy import String, Integer, Float, Boolean, Text, ForeignKey, DateTime
-from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.database import Base
-
-
-class KPIDefinition(Base):
+class KPIDefinition(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "kpi_definitions"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    factory_id: Mapped[int | None] = mapped_column(ForeignKey("factories.id", ondelete="CASCADE"), index=True)
-    code: Mapped[str] = mapped_column(String(60), index=True)
-    name: Mapped[str] = mapped_column(String(150))
-    category: Mapped[str] = mapped_column(String(40), default="production")
-    formula: Mapped[str | None] = mapped_column(Text)
-    unit: Mapped[str | None] = mapped_column(String(20))
-    target_value: Mapped[float | None] = mapped_column(Float)
-    warning_threshold: Mapped[float | None] = mapped_column(Float)
-    critical_threshold: Mapped[float | None] = mapped_column(Float)
-    higher_is_better: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_custom: Mapped[bool] = mapped_column(Boolean, default=False)
-    display_format: Mapped[str] = mapped_column(String(20), default="number")
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    factory_id: Mapped[Optional[int]] = mapped_column(Integer, index=True)
+    code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    formula: Mapped[Optional[str]] = mapped_column(Text)
+    unit: Mapped[Optional[str]] = mapped_column(String(16))
+    target_value: Mapped[Optional[float]] = mapped_column(Float)
+    warning_threshold: Mapped[Optional[float]] = mapped_column(Float)
+    critical_threshold: Mapped[Optional[float]] = mapped_column(Float)
+    higher_is_better: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_custom: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    display_format: Mapped[str] = mapped_column(String(16), default="number", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
-class KPIValue(Base):
+class KPIValue(Base, TimestampMixin):
     __tablename__ = "kpi_values"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    kpi_id: Mapped[int] = mapped_column(ForeignKey("kpi_definitions.id", ondelete="CASCADE"), index=True)
-    factory_id: Mapped[int] = mapped_column(ForeignKey("factories.id", ondelete="CASCADE"), index=True)
-    period_type: Mapped[str] = mapped_column(String(20), default="daily")
-    period_date: Mapped[dt.datetime] = mapped_column(DateTime, index=True)
-    value: Mapped[float] = mapped_column(Float, default=0)
-    status: Mapped[str] = mapped_column(String(20), default="good")
-    calculated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=dt.datetime.utcnow)
-
-    kpi: Mapped["KPIDefinition"] = relationship("KPIDefinition")
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kpi_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    factory_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    period_type: Mapped[str] = mapped_column(String(16), default="daily", nullable=False)
+    period_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    value: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="good", nullable=False)
+    calculated_at: Mapped[DateTime] = mapped_column(DateTime, nullable=False)
