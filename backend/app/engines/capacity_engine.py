@@ -1,25 +1,44 @@
-from datetime import timedelta
-
-from sqlalchemy import select, func
-
-from app.engines.base import BaseEngine
-from app.models.production import ProductionLine, ProductionOrder
+Input
+"""Capacity engine — computes utilization per line and identifies overloads."""
+from datetime import date, timedelta
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+from app.engines import BaseEngine, EngineResult
+from app.models import ProductionLine, ProductionOrder
 
 
 class CapacityEngine(BaseEngine):
-    name = "capacity_engine"
+    name = "capacity"
 
-    def execute(self, db, factory_id: int):
+    def _execute(self, db: Session, factory_id: int, r: EngineResult, **kwargs):
         lines = db.scalars(select(ProductionLine).where(
-            ProductionLine.factory_id == factory_id, ProductionLine.is_deleted == False)).all()
-        orders = db.scalars(select(ProductionOrder).where(ProductionOrder.factory_id == factory_id)).all()
-        since = __import__("datetime").datetime.utcnow() - timedelta(days=7)
+            ProductionLine.factory_id == factory_id,
+        )).all()
+        start = date.today() - timedelta(days=7)
         out = []
-        for l in lines:
-            produced = sum(o.produced_qty for o in orders if o.line_id == l.id and o.actual_start and o.actual_start >= since)
-            cap = l.capacity_per_hour * 8 * 7
-            util = round(produced / cap * 100, 1) if cap else 0
-            out.append({"line": l.name, "utilization": util,
-                        "status": "overload" if util > 100 else "balanced" if util > 70 else "underutilized"})
-        out.sort(key=lambda x: x["utilization"], reverse=True)
-        return self._ok("Capacity analysis complete", {"lines": out})
+        overloads = 0
+        for line in lines:
+            orders = db.scalars(select(ProductionOrder).where(
+                ProductionOrder.factory_id == factory_id,
+                ProductionOrder.line_id == line.id,
+                ProductionOrder.planned_start >= start,
+            )).all()
+            cap_h = line.capacity_per_hour * 8  # 8h shift
+            used_h = sum(o.planned_qty / max(1, line.capacity_per_hour) + (line.changeover_minutes / 60)
+                         for o in orders)
+            util = (used_h / (cap_h * 7)) * 100 if cap_h else 0
+            status = "ok"
+            if util > 100: status = "overload"; overloads += 1
+            elif util > 85: status = "warning"
+            out.append({
+                "line_id": line.id, "line_code": line.code, "line_name": line.name,
+                "capacity_per_hour": line.capacity_per_hour,
+                "utilization_pct": round(util, 1),
+                "status": status,
+            })
+        r.data["lines"] = out
+        r.data["overloads"] = overloads
+        r.items_processed = len(out)
+        if overloads:
+            r.alerts_created += overloads
+        db.commit()
