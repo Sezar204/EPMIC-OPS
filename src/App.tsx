@@ -1,3 +1,4 @@
+Input
 import { useEffect, useState, useCallback, lazy, Suspense } from "react"
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
 import { SplashScreen }  from "@/components/desktop/SplashScreen"
@@ -58,10 +59,10 @@ export default function App() {
         setSettings(settingsRes.value.data)
       }
       if (factoriesRes.status === "fulfilled" && factoriesRes.value?.data) {
-        setFactories(factoriesRes.value.data as any[])
+        setFactories(factoriesRes.value.data as never[])
       }
       if (backupsRes.status === "fulfilled" && backupsRes.value?.data) {
-        const backups = backupsRes.value.data as any[]
+        const backups = backupsRes.value.data as Array<{ created_at: string; status: "success" | "failed" }>
         if (backups.length > 0) {
           setLastBackup(backups[0].created_at, backups[0].status)
         }
