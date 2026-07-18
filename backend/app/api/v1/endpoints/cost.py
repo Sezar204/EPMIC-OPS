@@ -1,54 +1,49 @@
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func
+Input
+from datetime import date
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-
 from app.core.database import get_db
-from app.core.helpers import add_crud_routes
-from app.core.response import ok
-from app.models.cost import ProductCost
-from app.models.product import Product
-from app.models.sales import SalesOrder, SalesOrderLine
+from app.schemas import ok
+from app.schemas.cost import ProductCostCreate
+from app.services.quality_maint_wf import CostService
+from app.models import ProductCost
 
 router = APIRouter()
-add_crud_routes(router, ProductCost, "cost/product-costs", order_by="period_label")
 
 
-@router.get("/{factory_id}/cost/analysis/variance")
+@router.get("/product-costs/{factory_id}")
+def list_costs(factory_id: int, db: Session = Depends(get_db)):
+    items = db.query(ProductCost).filter(ProductCost.factory_id == factory_id).all()
+    out = []
+    for c in items:
+        v = c.act_total_cost - c.std_total_cost
+        vp = (v / c.std_total_cost * 100) if c.std_total_cost else 0
+        status = "good" if abs(vp) < 5 else ("warning" if abs(vp) < 10 else "danger")
+        out.append({
+            "id": c.id, "factory_id": c.factory_id, "product_id": c.product_id,
+            "period_date": c.period_date.isoformat(),
+            "std_material_cost": c.std_material_cost, "act_material_cost": c.act_material_cost,
+            "std_labor_cost":    c.std_labor_cost,    "act_labor_cost":    c.act_labor_cost,
+            "std_overhead_cost": c.std_overhead_cost, "act_overhead_cost": c.act_overhead_cost,
+            "std_total_cost":    c.std_total_cost,    "act_total_cost":    c.act_total_cost,
+            "revenue": c.revenue, "variance_pct": round(vp, 1), "status": status,
+        })
+    return ok(out, total=len(out))
+
+
+@router.post("/product-costs/{factory_id}")
+def create_cost(factory_id: int, payload: ProductCostCreate, db: Session = Depends(get_db)):
+    c = CostService.save_cost(db, factory_id, payload)
+    return ok({"id": c.id}, "Cost recorded")
+
+
+@router.get("/analysis/variance/{factory_id}")
 def variance(factory_id: int, period: str | None = None, db: Session = Depends(get_db)):
-    q = select(ProductCost).where(ProductCost.factory_id == factory_id)
-    if period:
-        q = q.where(ProductCost.period_label == period)
-    costs = db.scalars(q).all()
-    out = []
-    for c in costs:
-        p = db.get(Product, c.product_id)
-        var = round((c.act_total - c.std_total) / c.std_total * 100, 2) if c.std_total else 0
-        status = "ok" if abs(var) < 5 else "warning" if abs(var) < 10 else "critical"
-        out.append({"product": p.name if p else "-", "sku": p.sku if p else "-",
-                    "std_total": c.std_total, "act_total": c.act_total,
-                    "variance_pct": var, "status": status})
-    total_var = round(sum(o["act_total"] - o["std_total"] for o in out), 2)
-    return ok({"rows": out, "total_variance": total_var,
-               "material": round(sum(o["act_total"] for o in out), 2)})
+    p = date.fromisoformat(period) if period else None
+    return ok(CostService.variance_analysis(db, factory_id, p))
 
 
-@router.get("/{factory_id}/cost/analysis/profitability")
-def profitability(factory_id: int, db: Session = Depends(get_db)):
-    products = db.scalars(select(Product).where(Product.factory_id == factory_id, Product.is_deleted == False)).all()
-    out = []
-    for p in products:
-        revenue = db.scalar(select(func.coalesce(func.sum(SalesOrderLine.line_total), 0)).where(
-            SalesOrderLine.product_id == p.id,
-            SalesOrderLine.order_id.in_(select(SalesOrder.id).where(SalesOrder.factory_id == factory_id, SalesOrder.is_deleted == False))
-        )) or 0
-        cost = db.scalar(select(func.coalesce(func.sum(ProductCost.act_total), 0)).where(ProductCost.product_id == p.id)) or 0
-        margin = revenue - cost
-        margin_pct = round(margin / revenue * 100, 1) if revenue else 0
-        out.append({"product": p.name, "sku": p.sku, "revenue": round(revenue, 2),
-                    "cost": round(cost, 2), "margin": round(margin, 2), "margin_pct": margin_pct})
-    out.sort(key=lambda x: x["margin_pct"], reverse=True)
-    total_rev = sum(o["revenue"] for o in out)
-    total_cost = sum(o["cost"] for o in out)
-    return ok({"rows": out, "revenue": round(total_rev, 2), "cost": round(total_cost, 2),
-               "gross_profit": round(total_rev - total_cost, 2),
-               "avg_margin": round((total_rev - total_cost) / total_rev * 100, 1) if total_rev else 0})
+@router.get("/analysis/profitability/{factory_id}")
+def profitability(factory_id: int, period: str | None = None, db: Session = Depends(get_db)):
+    p = date.fromisoformat(period) if period else None
+    return ok(CostService.profitability(db, factory_id, p))
