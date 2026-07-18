@@ -1,3 +1,4 @@
+Input
 import { create } from "zustand"
 import { persist } from "zustand/middleware"
 import type { Factory, Alert } from "@/types"
