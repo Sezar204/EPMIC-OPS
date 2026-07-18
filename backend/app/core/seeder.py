@@ -1,627 +1,491 @@
-"""Demo data seeder. Runs only when the factories table is empty."""
-from __future__ import annotations
-
-import datetime as dt
+Input
+"""Seed demo data for a brand-new EMICP install."""
+import logging
 import random
+from datetime import date, datetime, timedelta
+from sqlalchemy.orm import Session
+from sqlalchemy import select
 
-from sqlalchemy import select, func
-
-from app.core.database import SessionLocal
 from app.models import (
-    Factory, FactoryCalendar, ProductionLine, Machine, Shift, ProductionOrder,
-    Product, BOMHeader, BOMLine, RawMaterial, InventoryRawMaterial,
-    InventoryFinishedGoods, InventoryWIP, Customer, SalesOrder, SalesOrderLine,
-    DemandForecast, Supplier, SupplierMaterial, PurchaseOrder, PurchaseOrderLine,
-    Warehouse, QualityCheck, NonConformanceReport, CAPARecord, MaintenanceSchedule,
-    MaintenanceWorkOrder, MachineBreakdown, Worker, ShiftAssignment, AttendanceRecord,
-    ProductCost, KPIDefinition, KPIValue, Alert, Decision, BackupLog, AppSetting,
+    Factory, ProductionLine, Machine, Shift, Product, BOMHeader, BOMLine,
+    RawMaterial, InventoryRawMaterial, InventoryFinishedGoods,
+    Customer, SalesOrder, SalesOrderLine,
+    Supplier, SupplierMaterial, PurchaseOrder, PurchaseOrderLine,
+    Warehouse, QualityCheck, NonConformanceReport, CAPARecord,
+    MaintenanceWorkOrder, Worker, AttendanceRecord, ProductCost,
+    KPIDefinition, KPIValue, Alert, Decision, AppSetting,
 )
 
-
-def _today() -> dt.date:
-    return dt.date.today()
+logger = logging.getLogger(__name__)
 
 
-def _now() -> dt.datetime:
-    return dt.datetime.utcnow()
+def _has_data(db: Session) -> bool:
+    return db.execute(select(Factory).limit(1)).first() is not None
 
 
-def _days_ago(n: int) -> dt.datetime:
-    return _now() - dt.timedelta(days=n)
+def seed_demo_data(db: Session) -> dict:
+    """Populate a realistic demo dataset. Idempotent: skips if data exists."""
+    if _has_data(db):
+        return {"seeded": False, "reason": "already has data"}
 
+    rng = random.Random(42)
+    today = date.today()
 
-def _days_ahead(n: int) -> dt.datetime:
-    return _now() + dt.timedelta(days=n)
-
-
-def seed_demo_data(db) -> None:
-    count = db.scalar(select(func.count()).select_from(Factory))
-    if count and count > 0:
-        return
-
-    random.seed(42)
-
-    # ---- Factory ----
+    # ---------- Factory ----------
     factory = Factory(
-        code="CAIRO-01", name="Cairo Manufacturing Plant", type="hybrid",
-        status="active", location="Cairo, Egypt", currency="EGP",
-        timezone="Africa/Cairo", working_start="08:00", working_end="18:00",
-        notes="Flagship plant — snacks, beverages and confectionery.",
+        code="CAI-01", name="Cairo Manufacturing Plant",
+        type="hybrid", status="active", location="Cairo, Egypt",
+        currency="EGP", timezone="Africa/Cairo",
+        working_start="08:00", working_end="17:00",
+        notes="Main demo factory — packaged goods production.",
     )
-    db.add(factory)
-    db.flush()
-
+    db.add(factory); db.flush()
     fid = factory.id
 
-    # Working calendar for current + next month
-    today = _today()
-    for d in range(-10, 40):
-        day = today + dt.timedelta(days=d)
-        is_weekend = day.weekday() >= 5
-        db.add(FactoryCalendar(
-            factory_id=fid, cal_date=day,
-            is_working_day=not is_weekend, is_holiday=False,
-        ))
+    # ---------- Production Lines ----------
+    lines = [
+        ProductionLine(factory_id=fid, code="PKG-01", name="Packaging Line A",
+                       type="discrete", capacity_per_hour=500, capacity_unit="pcs",
+                       status="active", changeover_minutes=20),
+        ProductionLine(factory_id=fid, code="ASM-01", name="Assembly Line B",
+                       type="discrete", capacity_per_hour=200, capacity_unit="pcs",
+                       status="active", changeover_minutes=30),
+        ProductionLine(factory_id=fid, code="PRC-01", name="Processing Line C",
+                       type="process", capacity_per_hour=1000, capacity_unit="kg",
+                       status="idle",   changeover_minutes=45),
+    ]
+    db.add_all(lines); db.flush()
 
-    # ---- Production lines ----
-    pl_pkg = ProductionLine(factory_id=fid, code="PL-PKG", name="Packaging Line",
-                            type="discrete", capacity_per_hour=500, capacity_unit="units",
-                            status="active", changeover_minutes=20)
-    pl_asm = ProductionLine(factory_id=fid, code="PL-ASM", name="Assembly Line",
-                            type="discrete", capacity_per_hour=200, capacity_unit="units",
-                            status="active", changeover_minutes=30)
-    pl_prc = ProductionLine(factory_id=fid, code="PL-PRC", name="Processing Line",
-                            type="process", capacity_per_hour=1000, capacity_unit="kg",
-                            status="active", changeover_minutes=45)
-    db.add_all([pl_pkg, pl_asm, pl_prc])
-    db.flush()
-
-    # ---- Machines ----
+    # ---------- Machines ----------
     machines = [
-        Machine(factory_id=fid, line_id=pl_pkg.id, code="PKG-01", name="Packaging Line A",
-                type="Flow wrapper", capacity=500, capacity_unit="units/h",
+        Machine(factory_id=fid, line_id=lines[0].id, code="M-101", name="Filler A1",
+                type="filler", capacity=600, capacity_unit="pcs/h",
                 criticality="high", status="active"),
-        Machine(factory_id=fid, line_id=pl_pkg.id, code="PKG-02", name="Carton Sealer",
-                capacity=400, capacity_unit="units/h", criticality="medium", status="active"),
-        Machine(factory_id=fid, line_id=pl_asm.id, code="ASM-01", name="Robotic Arm",
-                type="Pick & place", capacity=220, capacity_unit="units/h",
+        Machine(factory_id=fid, line_id=lines[0].id, code="M-102", name="Capper A2",
+                type="capper", capacity=600, capacity_unit="pcs/h",
+                criticality="high", status="active"),
+        Machine(factory_id=fid, line_id=lines[1].id, code="M-201", name="Conveyor B1",
+                type="conveyor", capacity=300, capacity_unit="pcs/h",
+                criticality="medium", status="active"),
+        Machine(factory_id=fid, line_id=lines[1].id, code="M-202", name="Labeler B2",
+                type="labeler", capacity=250, capacity_unit="pcs/h",
+                criticality="medium", status="maintenance"),
+        Machine(factory_id=fid, line_id=lines[2].id, code="M-301", name="Mixer C1",
+                type="mixer", capacity=1200, capacity_unit="kg/h",
                 criticality="critical", status="active"),
-        Machine(factory_id=fid, line_id=pl_asm.id, code="ASM-02", name="Conveyor",
-                capacity=250, capacity_unit="units/h", criticality="medium", status="idle"),
-        Machine(factory_id=fid, line_id=pl_prc.id, code="PRC-01", name="Mixer",
-                type="Batch mixer", capacity=1200, capacity_unit="kg/h",
-                criticality="critical", status="active"),
-        Machine(factory_id=fid, line_id=pl_prc.id, code="PRC-02", name="Reactor",
-                type="Thermal reactor", capacity=900, capacity_unit="kg/h",
-                criticality="high", status="maintenance"),
-        Machine(factory_id=fid, line_id=pl_prc.id, code="PRC-03", name="Filler",
-                capacity=1000, capacity_unit="kg/h", criticality="medium", status="active"),
-        Machine(factory_id=fid, code="GEN-01", name="Air Compressor",
-                type="Utility", criticality="low", status="down"),
+        Machine(factory_id=fid, line_id=lines[2].id, code="M-302", name="Reactor C2",
+                type="reactor", capacity=800, capacity_unit="kg/h",
+                criticality="critical", status="down"),
+        Machine(factory_id=fid, code="M-401", name="Boiler D1",
+                type="boiler", capacity=2000, capacity_unit="kg/h",
+                criticality="high", status="active"),
+        Machine(factory_id=fid, code="M-402", name="Compressor D2",
+                type="compressor", capacity=1500, capacity_unit="kg/h",
+                criticality="medium", status="active"),
     ]
-    db.add_all(machines)
-    db.flush()
+    db.add_all(machines); db.flush()
 
-    # ---- Shifts ----
+    # ---------- Shifts ----------
     shifts = [
-        Shift(factory_id=fid, name="Morning", start_time="06:00", end_time="14:00",
-              break_minutes=30, days_of_week="1,2,3,4,5", headcount=20, is_active=True),
+        Shift(factory_id=fid, name="Morning",   start_time="06:00", end_time="14:00",
+              break_minutes=30, days_of_week="1,2,3,4,5", headcount=8, is_active=True),
         Shift(factory_id=fid, name="Afternoon", start_time="14:00", end_time="22:00",
-              break_minutes=30, days_of_week="1,2,3,4,5", headcount=15, is_active=True),
-        Shift(factory_id=fid, name="Night", start_time="22:00", end_time="06:00",
-              break_minutes=45, days_of_week="1,2,3,4,5", headcount=10, is_active=True),
+              break_minutes=30, days_of_week="1,2,3,4,5", headcount=8, is_active=True),
+        Shift(factory_id=fid, name="Night",     start_time="22:00", end_time="06:00",
+              break_minutes=45, days_of_week="1,2,3,4,5,6,7", headcount=5, is_active=True),
     ]
-    db.add_all(shifts)
-    db.flush()
+    db.add_all(shifts); db.flush()
 
-    # ---- Products ----
+    # ---------- Products ----------
     products = [
-        Product(factory_id=fid, sku="PST-001", name="Premium Snack Pack", category="Snacks",
-                unit_of_measure="pack", standard_cost=2.5, selling_price=4.5, min_order_qty=100,
-                lead_time_days=2, type="finished"),
-        Product(factory_id=fid, sku="PST-002", name="Family Snack Pack", category="Snacks",
-                unit_of_measure="pack", standard_cost=4.0, selling_price=6.9, min_order_qty=50,
-                lead_time_days=2, type="finished"),
-        Product(factory_id=fid, sku="SEM-001", name="Seasoning Mix", category="Semi",
-                unit_of_measure="kg", standard_cost=1.2, selling_price=1.8, min_order_qty=50,
-                lead_time_days=1, type="semi-finished"),
-        Product(factory_id=fid, sku="SEM-002", name="Syrup Base", category="Semi",
-                unit_of_measure="L", standard_cost=0.8, selling_price=1.2, min_order_qty=50,
-                lead_time_days=1, type="semi-finished"),
-        Product(factory_id=fid, sku="PST-003", name="Bottled Drink 500ml", category="Beverages",
-                unit_of_measure="bottle", standard_cost=0.6, selling_price=1.2, min_order_qty=500,
-                lead_time_days=1, type="finished"),
-        Product(factory_id=fid, sku="PST-004", name="Bottled Drink 1L", category="Beverages",
-                unit_of_measure="bottle", standard_cost=1.1, selling_price=2.0, min_order_qty=300,
-                lead_time_days=1, type="finished"),
-        Product(factory_id=fid, sku="PST-005", name="Granola Bar", category="Snacks",
-                unit_of_measure="bar", standard_cost=1.5, selling_price=2.8, min_order_qty=200,
-                lead_time_days=2, type="finished"),
-        Product(factory_id=fid, sku="SEM-003", name="Filling Paste", category="Semi",
-                unit_of_measure="kg", standard_cost=2.0, selling_price=3.0, min_order_qty=40,
-                lead_time_days=1, type="semi-finished"),
-        Product(factory_id=fid, sku="PST-006", name="Chocolate Coated", category="Confectionery",
-                unit_of_measure="box", standard_cost=3.0, selling_price=5.5, min_order_qty=80,
-                lead_time_days=3, type="finished"),
-        Product(factory_id=fid, sku="PST-007", name="Gift Bundle", category="Snacks",
-                unit_of_measure="pack", standard_cost=5.0, selling_price=9.9, min_order_qty=30,
-                lead_time_days=3, type="finished"),
+        Product(factory_id=fid, sku="BTL-500",  name="Bottle 500ml",     category="Beverage", unit_of_measure="pcs",
+                standard_cost=0.50, selling_price=1.25, min_order_qty=500,  lead_time_days=3, type="finished"),
+        Product(factory_id=fid, sku="BTL-1L",   name="Bottle 1L",        category="Beverage", unit_of_measure="pcs",
+                standard_cost=0.85, selling_price=2.00, min_order_qty=300,  lead_time_days=3, type="finished"),
+        Product(factory_id=fid, sku="CAP-28",   name="Cap 28mm",         category="Packaging", unit_of_measure="pcs",
+                standard_cost=0.05, selling_price=0.12, min_order_qty=1000, lead_time_days=2, type="semi-finished"),
+        Product(factory_id=fid, sku="LBL-FR",   name="Front Label",      category="Packaging", unit_of_measure="pcs",
+                standard_cost=0.02, selling_price=0.06, min_order_qty=2000, lead_time_days=4, type="semi-finished"),
+        Product(factory_id=fid, sku="JUICE-OR", name="Orange Juice 1L",  category="Beverage", unit_of_measure="pcs",
+                standard_cost=1.10, selling_price=2.80, min_order_qty=200,  lead_time_days=4, shelf_life_days=180, type="finished"),
+        Product(factory_id=fid, sku="JUICE-AP", name="Apple Juice 1L",   category="Beverage", unit_of_measure="pcs",
+                standard_cost=1.15, selling_price=2.90, min_order_qty=200,  lead_time_days=4, shelf_life_days=180, type="finished"),
+        Product(factory_id=fid, sku="WATER-500",name="Mineral Water 500",category="Beverage", unit_of_measure="pcs",
+                standard_cost=0.20, selling_price=0.75, min_order_qty=1000, lead_time_days=2, type="finished"),
+        Product(factory_id=fid, sku="SYRUP",    name="Fruit Syrup Base", category="Ingredient", unit_of_measure="kg",
+                standard_cost=2.30, selling_price=0,    min_order_qty=50,   lead_time_days=5, type="semi-finished"),
+        Product(factory_id=fid, sku="BOX-12",   name="Box of 12",        category="Packaging", unit_of_measure="pcs",
+                standard_cost=0.30, selling_price=0,    min_order_qty=300,  lead_time_days=5, type="finished"),
+        Product(factory_id=fid, sku="PROMO-3",  name="3-Bottle Pack",    category="Beverage", unit_of_measure="pcs",
+                standard_cost=1.40, selling_price=3.50, min_order_qty=200,  lead_time_days=3, type="finished"),
     ]
-    db.add_all(products)
-    db.flush()
-    by_sku = {p.sku: p for p in products}
+    db.add_all(products); db.flush()
 
-    # ---- Raw materials ----
-    rms = [
-        RawMaterial(factory_id=fid, code="RM-001", name="Plastic Film", category="Packaging",
-                    unit_of_measure="kg", standard_cost=1.2, safety_stock_qty=200, reorder_point_qty=150, lead_time_days=7),
-        RawMaterial(factory_id=fid, code="RM-002", name="Carton Box", category="Packaging",
-                    unit_of_measure="each", standard_cost=0.3, safety_stock_qty=500, reorder_point_qty=300, lead_time_days=5),
-        RawMaterial(factory_id=fid, code="RM-003", name="Wheat Flour", category="Ingredient",
-                    unit_of_measure="kg", standard_cost=0.5, safety_stock_qty=1000, reorder_point_qty=600, lead_time_days=4),
-        RawMaterial(factory_id=fid, code="RM-004", name="Sugar", category="Ingredient",
-                    unit_of_measure="kg", standard_cost=0.4, safety_stock_qty=800, reorder_point_qty=500, lead_time_days=3),
-        RawMaterial(factory_id=fid, code="RM-005", name="Palm Oil", category="Ingredient",
-                    unit_of_measure="kg", standard_cost=0.7, safety_stock_qty=400, reorder_point_qty=250, lead_time_days=6),
-        RawMaterial(factory_id=fid, code="RM-006", name="Salt", category="Ingredient",
-                    unit_of_measure="kg", standard_cost=0.1, safety_stock_qty=300, reorder_point_qty=200, lead_time_days=2),
-        RawMaterial(factory_id=fid, code="RM-007", name="Cocoa Powder", category="Ingredient",
-                    unit_of_measure="kg", standard_cost=2.5, safety_stock_qty=100, reorder_point_qty=60, lead_time_days=10),
-        RawMaterial(factory_id=fid, code="RM-008", name="Vanilla Flavor", category="Flavor",
-                    unit_of_measure="kg", standard_cost=5.0, safety_stock_qty=20, reorder_point_qty=10, lead_time_days=14),
-        RawMaterial(factory_id=fid, code="RM-009", name="Preservative", category="Additive",
-                    unit_of_measure="kg", standard_cost=1.5, safety_stock_qty=50, reorder_point_qty=30, lead_time_days=7),
-        RawMaterial(factory_id=fid, code="RM-010", name="Coloring", category="Additive",
-                    unit_of_measure="kg", standard_cost=1.0, safety_stock_qty=30, reorder_point_qty=15, lead_time_days=7),
-        RawMaterial(factory_id=fid, code="RM-011", name="Nuts", category="Ingredient",
-                    unit_of_measure="kg", standard_cost=3.0, safety_stock_qty=80, reorder_point_qty=50, lead_time_days=9),
-        RawMaterial(factory_id=fid, code="RM-012", name="Water", category="Ingredient",
-                    unit_of_measure="L", standard_cost=0.05, safety_stock_qty=2000, reorder_point_qty=1000, lead_time_days=1),
-        RawMaterial(factory_id=fid, code="RM-013", name="Bottle PET 500", category="Packaging",
-                    unit_of_measure="each", standard_cost=0.08, safety_stock_qty=5000, reorder_point_qty=3000, lead_time_days=5),
-        RawMaterial(factory_id=fid, code="RM-014", name="Bottle PET 1L", category="Packaging",
-                    unit_of_measure="each", standard_cost=0.12, safety_stock_qty=3000, reorder_point_qty=2000, lead_time_days=5),
-        RawMaterial(factory_id=fid, code="RM-015", name="Cap", category="Packaging",
-                    unit_of_measure="each", standard_cost=0.03, safety_stock_qty=6000, reorder_point_qty=4000, lead_time_days=5),
+    # ---------- Raw Materials ----------
+    raw_materials = [
+        RawMaterial(factory_id=fid, code="RM-PET",   name="PET Resin",       category="Plastic",     unit_of_measure="kg",
+                    standard_cost=1.50, safety_stock_qty=500, reorder_point_qty=1000, lead_time_days=10, storage_conditions="dry"),
+        RawMaterial(factory_id=fid, code="RM-HDPE",  name="HDPE Resin",      category="Plastic",     unit_of_measure="kg",
+                    standard_cost=1.65, safety_stock_qty=400, reorder_point_qty=800,  lead_time_days=10, storage_conditions="dry"),
+        RawMaterial(factory_id=fid, code="RM-PAPER", name="Label Paper",     category="Paper",       unit_of_measure="roll",
+                    standard_cost=12.0, safety_stock_qty=20,  reorder_point_qty=40,   lead_time_days=5,  storage_conditions="dry"),
+        RawMaterial(factory_id=fid, code="RM-INK",   name="Printing Ink",    category="Chemical",    unit_of_measure="liter",
+                    standard_cost=8.0,  safety_stock_qty=30,  reorder_point_qty=60,   lead_time_days=7,  storage_conditions="cool"),
+        RawMaterial(factory_id=fid, code="RM-ORJUICE",name="Orange Concentrate", category="Ingredient", unit_of_measure="liter",
+                    standard_cost=3.20, safety_stock_qty=200, reorder_point_qty=400,  lead_time_days=5,  shelf_life_days=120, storage_conditions="cold"),
+        RawMaterial(factory_id=fid, code="RM-APJUICE",name="Apple Concentrate",  category="Ingredient", unit_of_measure="liter",
+                    standard_cost=3.10, safety_stock_qty=200, reorder_point_qty=400,  lead_time_days=5,  shelf_life_days=120, storage_conditions="cold"),
+        RawMaterial(factory_id=fid, code="RM-SUGAR", name="Sugar",           category="Ingredient",  unit_of_measure="kg",
+                    standard_cost=0.80, safety_stock_qty=500, reorder_point_qty=1000, lead_time_days=3),
+        RawMaterial(factory_id=fid, code="RM-WATER", name="RO Water",        category="Ingredient",  unit_of_measure="liter",
+                    standard_cost=0.05, safety_stock_qty=2000,reorder_point_qty=5000, lead_time_days=1),
+        RawMaterial(factory_id=fid, code="RM-CA",    name="Citric Acid",     category="Chemical",    unit_of_measure="kg",
+                    standard_cost=2.10, safety_stock_qty=50,  reorder_point_qty=100,  lead_time_days=7),
+        RawMaterial(factory_id=fid, code="RM-VITC",  name="Vitamin C",       category="Chemical",    unit_of_measure="kg",
+                    standard_cost=12.5, safety_stock_qty=10,  reorder_point_qty=20,   lead_time_days=14, shelf_life_days=365),
+        RawMaterial(factory_id=fid, code="RM-CAP",   name="Cap Resin",       category="Plastic",     unit_of_measure="kg",
+                    standard_cost=1.85, safety_stock_qty=200, reorder_point_qty=400,  lead_time_days=10),
+        RawMaterial(factory_id=fid, code="RM-BOX",   name="Cardboard Sheet", category="Paper",       unit_of_measure="pcs",
+                    standard_cost=0.30, safety_stock_qty=500, reorder_point_qty=1000, lead_time_days=5),
+        RawMaterial(factory_id=fid, code="RM-FLAV",  name="Flavor Mix",      category="Ingredient",  unit_of_measure="kg",
+                    standard_cost=18.0, safety_stock_qty=10,  reorder_point_qty=20,   lead_time_days=10, shelf_life_days=240),
+        RawMaterial(factory_id=fid, code="RM-COLOR", name="Colorant",        category="Chemical",    unit_of_measure="kg",
+                    standard_cost=5.5,  safety_stock_qty=20,  reorder_point_qty=40,   lead_time_days=7),
+        RawMaterial(factory_id=fid, code="RM-SALT",  name="Salt",            category="Ingredient",  unit_of_measure="kg",
+                    standard_cost=0.30, safety_stock_qty=100, reorder_point_qty=200,  lead_time_days=3),
     ]
-    db.add_all(rms)
-    db.flush()
-    by_rm = {r.code: r for r in rms}
+    db.add_all(raw_materials); db.flush()
 
-    # ---- BOMs ----
-    def add_bom(sku: str, name: str, lines: list[tuple[str, float, str, float]]):
-        prod = by_sku[sku]
-        bom = BOMHeader(factory_id=fid, product_id=prod.id, version="1.0", name=name,
-                        status="active", yield_pct=98.0, effective_date=_today())
-        db.add(bom)
-        db.flush()
-        for seq, (rm_code, qty, unit, loss) in enumerate(lines, start=1):
-            rm = by_rm[rm_code]
-            db.add(BOMLine(bom_id=bom.id, material_id=rm.id, quantity_required=qty,
-                           unit=unit, loss_factor_pct=loss, is_alternative=False,
-                           sequence_no=seq))
+    # ---------- BOMs ----------
+    def add_bom(product, lines_data):
+        bom = BOMHeader(factory_id=fid, product_id=product.id, version="1.0",
+                        name=f"BOM {product.sku} v1.0", status="active", yield_pct=98)
+        db.add(bom); db.flush()
+        for seq, (mat_idx, qty, unit) in enumerate(lines_data, 1):
+            db.add(BOMLine(bom_id=bom.id, material_id=raw_materials[mat_idx].id,
+                           quantity_required=qty, unit=unit, sequence_no=seq))
+        return bom
 
-    add_bom("PST-001", "Premium Snack Pack BOM", [
-        ("RM-003", 0.40, "kg", 2), ("RM-004", 0.15, "kg", 1), ("RM-005", 0.10, "kg", 1),
-        ("RM-001", 0.05, "kg", 1), ("RM-009", 0.01, "kg", 0),
-    ])
-    add_bom("PST-002", "Family Snack Pack BOM", [
-        ("RM-003", 0.80, "kg", 2), ("RM-004", 0.30, "kg", 1), ("RM-005", 0.20, "kg", 1),
-        ("RM-002", 1, "each", 0), ("RM-009", 0.02, "kg", 0),
-    ])
-    add_bom("SEM-001", "Seasoning Mix BOM", [
-        ("RM-006", 0.30, "kg", 1), ("RM-008", 0.02, "kg", 0), ("RM-010", 0.01, "kg", 0),
-        ("RM-009", 0.01, "kg", 0),
-    ])
-    add_bom("SEM-002", "Syrup Base BOM", [
-        ("RM-004", 0.50, "kg", 1), ("RM-012", 0.40, "L", 0), ("RM-008", 0.03, "kg", 0),
-    ])
-    add_bom("PST-003", "Bottled Drink 500ml BOM", [
-        ("RM-012", 0.45, "L", 1), ("RM-010", 0.005, "kg", 0), ("RM-013", 1, "each", 0),
-        ("RM-015", 1, "each", 0),
-    ])
-    add_bom("PST-004", "Bottled Drink 1L BOM", [
-        ("RM-012", 0.95, "L", 1), ("RM-010", 0.01, "kg", 0), ("RM-014", 1, "each", 0),
-        ("RM-015", 1, "each", 0),
-    ])
-    add_bom("PST-005", "Granola Bar BOM", [
-        ("RM-003", 0.35, "kg", 2), ("RM-004", 0.10, "kg", 1), ("RM-011", 0.20, "kg", 1),
-        ("RM-001", 0.04, "kg", 1),
-    ])
-    add_bom("SEM-003", "Filling Paste BOM", [
-        ("RM-004", 0.40, "kg", 1), ("RM-007", 0.15, "kg", 1), ("RM-005", 0.10, "kg", 1),
-    ])
-    add_bom("PST-006", "Chocolate Coated BOM", [
-        ("RM-007", 0.25, "kg", 2), ("RM-003", 0.30, "kg", 1), ("RM-004", 0.10, "kg", 1),
-        ("RM-002", 1, "each", 0),
-    ])
-    add_bom("PST-007", "Gift Bundle BOM", [
-        ("RM-003", 0.50, "kg", 1), ("RM-007", 0.10, "kg", 1), ("RM-002", 1, "each", 0),
-    ])
+    add_bom(products[0], [(0, 0.025, "kg"), (2, 0.001, "roll"), (3, 0.0002, "liter"), (10, 0.005, "kg")])
+    add_bom(products[1], [(1, 0.040, "kg"), (2, 0.001, "roll"), (3, 0.0002, "liter"), (10, 0.005, "kg")])
+    add_bom(products[2], [(0, 0.003, "kg")])
+    add_bom(products[3], [(2, 0.001, "roll"), (3, 0.0001, "liter")])
+    add_bom(products[4], [(4, 0.20, "liter"), (6, 0.05, "kg"), (7, 0.70, "liter"),
+                         (8, 0.002, "kg"), (9, 0.0005, "kg"), (12, 0.005, "kg")])
+    add_bom(products[5], [(5, 0.20, "liter"), (6, 0.05, "kg"), (7, 0.70, "liter"),
+                         (8, 0.002, "kg"), (9, 0.0005, "kg")])
+    add_bom(products[6], [(7, 0.50, "liter"), (14, 0.001, "kg")])
+    add_bom(products[7], [(6, 0.65, "kg"), (7, 0.30, "liter"), (8, 0.005, "kg"),
+                         (12, 0.010, "kg"), (13, 0.002, "kg")])
+    add_bom(products[8], [(11, 1.0, "pcs"), (2, 0.05, "roll")])
+    add_bom(products[9], [(0, 0.075, "kg"), (1, 0.040, "kg"), (2, 0.003, "roll"),
+                         (3, 0.0006, "liter"), (10, 0.015, "kg")])
 
-    # ---- Suppliers + links ----
+    # ---------- Suppliers ----------
     suppliers = [
-        Supplier(factory_id=fid, code="SUP-001", name="Global Ingredients", contact_name="Ahmed",
-                 contact_email="ahmed@gig.com", rating=4.5, status="active", payment_terms_days=30),
-        Supplier(factory_id=fid, code="SUP-002", name="PackCorp", contact_name="Laila",
-                 contact_email="laila@packcorp.com", rating=4.0, status="active", payment_terms_days=45),
-        Supplier(factory_id=fid, code="SUP-003", name="FlavorHouse", contact_name="Samir",
-                 contact_email="samir@flavorhouse.com", rating=3.5, status="active", payment_terms_days=60),
-        Supplier(factory_id=fid, code="SUP-004", name="NutFarm", contact_name="Mona",
-                 contact_email="mona@nutfarm.com", rating=4.8, status="active", payment_terms_days=30),
-        Supplier(factory_id=fid, code="SUP-005", name="ChemSupply", contact_name="Tarek",
-                 contact_email="tarek@chemsupply.com", rating=3.0, status="active", payment_terms_days=30),
+        Supplier(factory_id=fid, code="SUP-PET",  name="Egyptian Petrochem Co.",   rating=5, status="active", payment_terms_days=30),
+        Supplier(factory_id=fid, code="SUP-PAP",  name="Nile Paper Mills",         rating=4, status="active", payment_terms_days=45),
+        Supplier(factory_id=fid, code="SUP-ING",  name="Agro Ingredients Ltd",     rating=4, status="active", payment_terms_days=30),
+        Supplier(factory_id=fid, code="SUP-CHEM", name="ChemSource International", rating=3, status="active", payment_terms_days=60),
+        Supplier(factory_id=fid, code="SUP-BOX",  name="Cairo Packaging Group",    rating=5, status="active", payment_terms_days=30),
     ]
-    db.add_all(suppliers)
-    db.flush()
-    sup_by_code = {s.code: s for s in suppliers}
+    db.add_all(suppliers); db.flush()
+    db.add_all([
+        SupplierMaterial(supplier_id=suppliers[0].id, material_id=raw_materials[0].id, supplier_price=1.45, lead_time_days=10, is_preferred=True),
+        SupplierMaterial(supplier_id=suppliers[0].id, material_id=raw_materials[1].id, supplier_price=1.60, lead_time_days=10, is_preferred=True),
+        SupplierMaterial(supplier_id=suppliers[1].id, material_id=raw_materials[2].id, supplier_price=11.5, lead_time_days=5,  is_preferred=True),
+        SupplierMaterial(supplier_id=suppliers[2].id, material_id=raw_materials[4].id, supplier_price=3.10, lead_time_days=5,  is_preferred=True),
+        SupplierMaterial(supplier_id=suppliers[2].id, material_id=raw_materials[5].id, supplier_price=3.00, lead_time_days=5,  is_preferred=True),
+        SupplierMaterial(supplier_id=suppliers[3].id, material_id=raw_materials[3].id, supplier_price=7.8,  lead_time_days=7,  is_preferred=True),
+        SupplierMaterial(supplier_id=suppliers[3].id, material_id=raw_materials[8].id, supplier_price=2.05, lead_time_days=7,  is_preferred=True),
+        SupplierMaterial(supplier_id=suppliers[4].id, material_id=raw_materials[11].id, supplier_price=0.28, lead_time_days=5,  is_preferred=True),
+    ])
 
-    # preferred supplier links
-    links = [
-        ("SUP-001", "RM-003"), ("SUP-001", "RM-004"), ("SUP-001", "RM-005"), ("SUP-001", "RM-006"),
-        ("SUP-002", "RM-001"), ("SUP-002", "RM-002"), ("SUP-002", "RM-013"), ("SUP-002", "RM-014"), ("SUP-002", "RM-015"),
-        ("SUP-003", "RM-008"), ("SUP-003", "RM-010"),
-        ("SUP-004", "RM-011"), ("SUP-004", "RM-007"),
-        ("SUP-005", "RM-009"), ("SUP-005", "RM-012"),
-    ]
-    for sc, mc in links:
-        db.add(SupplierMaterial(factory_id=fid, supplier_id=sup_by_code[sc].id,
-                                material_id=by_rm[mc].id, is_preferred=True,
-                                lead_time_days=by_rm[mc].lead_time_days,
-                                unit_price=by_rm[mc].standard_cost))
-
-    # ---- Customers ----
+    # ---------- Customers ----------
     customers = [
-        Customer(factory_id=fid, code="CUST-001", name="MegaMart", type="b2b", priority=5,
-                 credit_limit=500000, payment_terms_days=30, contact_name="Omar"),
-        Customer(factory_id=fid, code="CUST-002", name="RetailChain", type="distributor", priority=4,
-                 credit_limit=800000, payment_terms_days=45, contact_name="Hana"),
-        Customer(factory_id=fid, code="CUST-003", name="CafeSupply", type="b2b", priority=3,
-                 credit_limit=200000, payment_terms_days=30, contact_name="Yara"),
-        Customer(factory_id=fid, code="CUST-004", name="ExportTrader", type="b2b", priority=4,
-                 credit_limit=600000, payment_terms_days=60, contact_name="Khaled"),
-        Customer(factory_id=fid, code="CUST-005", name="LocalShop", type="b2c", priority=2,
-                 credit_limit=50000, payment_terms_days=15, contact_name="Sara"),
+        Customer(factory_id=fid, code="CUST-HM",  name="Hypermarket Co",         type="b2b",          priority=1, credit_limit=500000, payment_terms_days=60),
+        Customer(factory_id=fid, code="CUST-SUP", name="SuperStore Chain",       type="b2b",          priority=2, credit_limit=300000, payment_terms_days=45),
+        Customer(factory_id=fid, code="CUST-DIS", name="Regional Distributor",   type="distributor",  priority=1, credit_limit=800000, payment_terms_days=30),
+        Customer(factory_id=fid, code="CUST-CAF", name="Cafe Network",           type="b2b",          priority=3, credit_limit=50000,  payment_terms_days=30),
+        Customer(factory_id=fid, code="CUST-EXP", name="Export Trading Co",      type="b2b",          priority=2, credit_limit=200000, payment_terms_days=90),
     ]
-    db.add_all(customers)
-    db.flush()
-    cust_by_code = {c.code: c for c in customers}
+    db.add_all(customers); db.flush()
 
-    # ---- Warehouse ----
-    wh = Warehouse(factory_id=fid, code="WH-001", name="Main Warehouse", type="general",
-                   total_capacity=5000, capacity_unit="sqm", storage_conditions="Ambient, dry",
-                   location="Cairo Plant")
-    db.add(wh)
-    db.flush()
-    wh_id = wh.id
+    # ---------- Warehouse ----------
+    warehouse = Warehouse(factory_id=fid, code="WH-MAIN", name="Main Warehouse",
+                          type="general", total_capacity=5000, capacity_unit="sqm",
+                          storage_conditions="ambient", location="Cairo")
+    db.add(warehouse); db.flush()
+    wh_id = warehouse.id
 
-    # ---- Inventory (raw materials) ----
-    # explicit on-hand to create critical/healthy mix
-    inv_levels = {
-        "RM-001": 180, "RM-002": 600, "RM-003": 1200, "RM-004": 900, "RM-005": 300,
-        "RM-006": 250, "RM-007": 40, "RM-008": 8, "RM-009": 60, "RM-010": 35,
-        "RM-011": 70, "RM-012": 2500, "RM-013": 5200, "RM-014": 3100, "RM-015": 0,
-    }
-    for code, on_hand in inv_levels.items():
-        rm = by_rm[code]
-        reserved = round(on_hand * 0.15)
+    # ---------- Inventory (raw + finished) ----------
+    # 3 below safety, 1 zero
+    inv_raw_levels = [1200, 200, 60, 35, 800, 350, 1500, 6500, 80, 25, 600, 1100, 8, 18, 0]
+    for mat, lvl in zip(raw_materials, inv_raw_levels):
         db.add(InventoryRawMaterial(
-            factory_id=fid, material_id=rm.id, warehouse_id=wh_id,
-            qty_on_hand=on_hand, qty_reserved=reserved, qty_available=max(0, on_hand - reserved),
-            batch_number=f"B-{code}", last_movement=_today() - dt.timedelta(days=random.randint(1, 6)),
+            factory_id=fid, material_id=mat.id, warehouse_id=wh_id,
+            qty_on_hand=lvl, qty_reserved=0, qty_available=lvl,
+            last_movement_date=today - timedelta(days=rng.randint(0, 30)),
         ))
-
-    # ---- Inventory finished goods ----
-    for sku in ["PST-001", "PST-002", "PST-003", "PST-004", "PST-005", "PST-006"]:
-        p = by_sku[sku]
-        on_hand = random.randint(300, 1500)
-        reserved = round(on_hand * 0.2)
+    for prod in products[:7]:
         db.add(InventoryFinishedGoods(
-            factory_id=fid, product_id=p.id, warehouse_id=wh_id,
-            qty_on_hand=on_hand, qty_reserved=reserved, qty_available=on_hand - reserved,
-            batch_number=f"FG-{sku}", last_updated=_now(),
+            factory_id=fid, product_id=prod.id, warehouse_id=wh_id,
+            qty_on_hand=rng.randint(100, 1500),
+            qty_reserved=0, qty_available=rng.randint(100, 1500),
+            last_updated=datetime.utcnow(),
         ))
 
-    # ---- Sales orders ----
-    so_specs = [
-        ("CUST-001", "PST-001", 800, "confirmed", 5),
-        ("CUST-002", "PST-003", 5000, "in_production", 6),
-        ("CUST-003", "PST-005", 1200, "ready", 3),
-        ("CUST-004", "PST-006", 400, "confirmed", 1),
-        ("CUST-005", "PST-002", 200, "draft", 12),
-    ]
-    for i, (cc, sku, qty, status, due_in) in enumerate(so_specs, start=1):
-        cust = cust_by_code[cc]
-        prod = by_sku[sku]
-        order_date = _days_ago(random.randint(2, 20))
-        unit = prod.selling_price
-        line_total = qty * unit
+    # ---------- Sales Orders ----------
+    so_statuses = ["draft", "confirmed", "in_production", "ready", "shipped", "delivered"]
+    for i in range(5):
+        cust = customers[i % len(customers)]
         so = SalesOrder(
-            factory_id=fid, customer_id=cust.id, order_number=f"ORD-2026{str(i).zfill(4)}",
-            order_date=order_date, required_delivery=_days_ahead(due_in),
-            status=status, total_value=line_total, currency="EGP",
-            is_rush_order=(status == "confirmed" and due_in <= 3),
-            priority=cust.priority,
+            factory_id=fid, customer_id=cust.id,
+            order_number=f"ORD-{today.strftime('%Y%m%d')}-{i+1:03d}",
+            order_date=today - timedelta(days=rng.randint(0, 30)),
+            required_delivery=today + timedelta(days=rng.randint(-5, 21)),
+            status=rng.choice(so_statuses),
+            total_value=rng.randint(5000, 80000),
+            currency=factory.currency,
+            is_rush_order=(i == 0),
+            priority=rng.randint(1, 5),
         )
-        db.add(so)
-        db.flush()
-        db.add(SalesOrderLine(
-            order_id=so.id, product_id=prod.id, quantity=qty, unit_price=unit,
-            discount_pct=0, line_total=line_total, required_date=_days_ahead(due_in),
-            status="open", fulfilled_qty=round(qty * 0.4) if status in ("in_production", "ready") else 0,
-        ))
+        db.add(so); db.flush()
+        for j in range(rng.randint(1, 3)):
+            prod = rng.choice(products[:7])
+            qty  = rng.randint(50, 500)
+            price = prod.selling_price
+            db.add(SalesOrderLine(
+                order_id=so.id, product_id=prod.id,
+                quantity=qty, unit_price=price, discount_pct=0,
+                line_total=qty * price, status="open",
+            ))
 
-    # ---- Purchase orders (1 overdue) ----
-    po_specs = [
-        ("SUP-001", "RM-003", 1000, "received", -20),
-        ("SUP-002", "RM-013", 5000, "in_transit", -2),
-        ("SUP-004", "RM-007", 120, "issued", 12),
-    ]
-    for i, (sc, rm_code, qty, status, days) in enumerate(po_specs, start=1):
-        sup = sup_by_code[sc]
-        rm = by_rm[rm_code]
-        expected = _days_ahead(days) if days >= 0 else _days_ago(-days)
-        total = qty * rm.standard_cost
+    # ---------- Purchase Orders ----------
+    po_statuses = ["planned", "issued", "in_transit", "received", "closed"]
+    for i in range(3):
+        sup = suppliers[i % len(suppliers)]
+        expected = today + timedelta(days=[-3, 5, 10][i])
         po = PurchaseOrder(
-            factory_id=fid, supplier_id=sup.id, po_number=f"PO-2026{str(i).zfill(4)}",
-            order_date=_days_ago(abs(days) + 5), expected_delivery=expected,
-            status=status, total_value=total, currency="EGP",
+            factory_id=fid, supplier_id=sup.id,
+            po_number=f"PO-{today.strftime('%Y%m%d')}-{i+1:03d}",
+            order_date=today - timedelta(days=rng.randint(5, 20)),
+            expected_delivery=expected,
+            status=po_statuses[i],
+            total_value=rng.randint(2000, 25000),
+            currency=factory.currency,
         )
-        db.add(po)
-        db.flush()
-        db.add(PurchaseOrderLine(
-            po_id=po.id, material_id=rm.id, qty_ordered=qty, unit_price=rm.standard_cost,
-            qty_received=qty if status == "received" else 0,
-            quality_status="accepted" if status == "received" else "pending",
-        ))
+        db.add(po); db.flush()
+        for j in range(rng.randint(1, 2)):
+            mat = rng.choice(raw_materials)
+            qty = rng.randint(50, 300)
+            db.add(PurchaseOrderLine(
+                po_id=po.id, material_id=mat.id,
+                qty_ordered=qty, unit_price=mat.standard_cost,
+                qty_received=qty if i == 2 else 0,
+                quality_status="accepted" if i == 2 else "pending",
+            ))
 
-    # ---- Production orders (last 14 days) ----
-    prod_specs = [
-        (pl_pkg, "PST-001", 500, "completed", 12),
-        (pl_pkg, "PST-002", 300, "completed", 10),
-        (pl_asm, "PST-005", 800, "in_progress", 4),
-        (pl_prc, "SEM-002", 400, "planned", 2),
-        (pl_pkg, "PST-003", 4000, "completed", 6),
-        (pl_asm, "PST-006", 350, "planned", 1),
+    # ---------- Quality ----------
+    db.add_all([
+        QualityCheck(factory_id=fid, check_type="iqc", product_id=products[0].id,
+                     status="passed", sample_size=50, defects_found=0,
+                     defect_rate_pct=0, decision="accept",
+                     checked_at=datetime.utcnow() - timedelta(days=2)),
+        QualityCheck(factory_id=fid, check_type="ipqc", product_id=products[4].id,
+                     status="passed", sample_size=30, defects_found=1,
+                     defect_rate_pct=3.3, decision="accept",
+                     checked_at=datetime.utcnow() - timedelta(days=1)),
+        QualityCheck(factory_id=fid, check_type="oqc", product_id=products[5].id,
+                     status="failed", sample_size=40, defects_found=5,
+                     defect_rate_pct=12.5, decision="reject",
+                     checked_at=datetime.utcnow() - timedelta(hours=8)),
+        QualityCheck(factory_id=fid, check_type="iqc", material_id=raw_materials[0].id,
+                     status="passed", sample_size=10, defects_found=0,
+                     defect_rate_pct=0, decision="accept",
+                     checked_at=datetime.utcnow() - timedelta(days=5)),
+        QualityCheck(factory_id=fid, check_type="oqc", product_id=products[6].id,
+                     status="passed", sample_size=60, defects_found=1,
+                     defect_rate_pct=1.7, decision="accept",
+                     checked_at=datetime.utcnow() - timedelta(hours=2)),
+    ])
+
+    # ---------- NCR + CAPA ----------
+    ncr = NonConformanceReport(
+        factory_id=fid, ncr_number=f"NCR-{today.strftime('%Y%m%d')}-001",
+        title="Apple Juice batch failed OQC — high defect rate",
+        description="5 defects in 40 sample units; bottle seal failure.",
+        severity="high", status="open", root_cause="",
+    )
+    db.add(ncr); db.flush()
+    db.add(CAPARecord(
+        factory_id=fid, capa_number=f"CAPA-{today.strftime('%Y%m%d')}-001",
+        type="corrective", ncr_id=ncr.id,
+        description="Inspect capper torque settings; replace worn seal rings; re-validate.",
+        responsible_person="Maintenance Lead",
+        due_date=datetime.utcnow() + timedelta(days=14),
+        status="open",
+    ))
+
+    # ---------- Maintenance Work Orders ----------
+    db.add_all([
+        MaintenanceWorkOrder(factory_id=fid, machine_id=machines[3].id,
+                             wo_number="WO-001", type="corrective",
+                             status="in_progress", priority="high",
+                             description="Labeler B2 not applying labels consistently.",
+                             assigned_to="Ahmed M.", started_at=datetime.utcnow() - timedelta(hours=4),
+                             downtime_hours=4),
+        MaintenanceWorkOrder(factory_id=fid, machine_id=machines[1].id,
+                             wo_number="WO-002", type="preventive",
+                             status="completed", priority="medium",
+                             description="Quarterly PM — capper calibration.",
+                             assigned_to="Sara K.", started_at=datetime.utcnow() - timedelta(days=3),
+                             completed_at=datetime.utcnow() - timedelta(days=3, hours=-2),
+                             downtime_hours=2, resolution="Replaced O-ring; calibrated torque."),
+    ])
+
+    # ---------- Workers + Attendance ----------
+    worker_names = [
+        ("E-001", "Ahmed Hassan",   "Production", "Operator"),
+        ("E-002", "Sara Mahmoud",   "Production", "Operator"),
+        ("E-003", "Mohamed Ali",    "Production", "Line Lead"),
+        ("E-004", "Fatma Said",     "Quality",    "Inspector"),
+        ("E-005", "Karim Nabil",    "Quality",    "Inspector"),
+        ("E-006", "Yasmin Adel",    "Maintenance","Technician"),
+        ("E-007", "Omar Tarek",     "Warehouse",  "Forklift"),
+        ("E-008", "Hala Mostafa",   "Production", "Operator"),
+        ("E-009", "Tamer Gamal",    "Production", "Operator"),
+        ("E-010", "Nour Eldin",     "Maintenance","Technician"),
     ]
-    for i, (line, sku, qty, status, days) in enumerate(prod_specs, start=1):
-        prod = by_sku[sku]
-        produced = round(qty * 0.9) if status == "completed" else (round(qty * 0.5) if status == "in_progress" else 0)
-        db.add(ProductionOrder(
-            factory_id=fid, line_id=line.id, product_id=prod.id,
-            order_number=f"PRD-2026{str(i).zfill(4)}", planned_qty=qty, produced_qty=produced,
-            scrap_qty=round(qty * 0.02), status=status,
-            planned_start=_days_ago(days), planned_end=_days_ago(max(0, days - 1)),
-            actual_start=_days_ago(days) if status != "planned" else None,
-            priority=3,
-        ))
-
-    # ---- Quality checks ----
-    qc_specs = [
-        ("ipqc", "PST-001", 50, 2, "passed"),
-        ("iqc", "RM-003", 100, 0, "passed"),
-        ("oqc", "PST-003", 80, 9, "failed"),
-        ("ipqc", "PST-005", 60, 3, "passed"),
-        ("oqc", "PST-002", 40, 1, "passed"),
-    ]
-    failed_qc = None
-    for check_type, sku, sample, defects, status in qc_specs:
-        prod = by_sku.get(sku)
-        rate = round(defects / sample * 100, 2) if sample else 0
-        qc = QualityCheck(
-            factory_id=fid, check_type=check_type, product_id=prod.id if prod else None,
-            status=status, checked_at=_days_ago(random.randint(1, 8)), sample_size=sample,
-            defects_found=defects, defect_rate_pct=rate,
-            decision="accept" if status == "passed" else "reject",
-        )
-        db.add(qc)
-        db.flush()
-        if status == "failed":
-            failed_qc = qc
-
-    # ---- NCR + CAPA ----
-    if failed_qc:
-        ncr = NonConformanceReport(
-            factory_id=fid, ncr_number="NCR-2026-001", title="OQC failure on Bottled Drink 500ml",
-            description="Defect rate 11.25% exceeded 5% limit on cap seal.", severity="major",
-            status="open", quality_check_id=failed_qc.id, root_cause="Cap torque mis-set on filler.",
-            opened_at=_days_ago(6),
-        )
-        db.add(ncr)
-        db.flush()
-        db.add(CAPARecord(
-            factory_id=fid, capa_number="CAPA-2026-001", type="corrective", ncr_id=ncr.id,
-            description="Recalibrate cap torque on PRC-03 and add in-line vision check.",
-            responsible_person="Maintenance Lead", due_date=_days_ahead(7), status="open",
-        ))
-
-    # ---- Maintenance ----
-    # schedule for a couple machines
-    db.add(MaintenanceSchedule(factory_id=fid, machine_id=machines[0].id, type="preventive",
-                               frequency_days=90, last_done=_days_ago(30),
-                               next_due=_days_ahead(60), active=True))
-    db.add(MaintenanceSchedule(factory_id=fid, machine_id=machines[4].id, type="predictive",
-                               frequency_days=60, last_done=_days_ago(70),
-                               next_due=_days_ago(10), active=True))  # overdue
-    db.add(MaintenanceWorkOrder(
-        factory_id=fid, machine_id=machines[4].id, wo_number="WO-2026-001", type="preventive",
-        status="completed", priority="medium", description="Quarterly calibration.",
-        assigned_to="Tech A", created_at=_days_ago(40), started_at=_days_ago(40),
-        completed_at=_days_ago(39), downtime_hours=4, resolution="Calibrated.",
-    ))
-    db.add(MaintenanceWorkOrder(
-        factory_id=fid, machine_id=machines[5].id, wo_number="WO-2026-002", type="corrective",
-        status="in_progress", priority="high", description="Reactor overheating.",
-        assigned_to="Tech B", created_at=_days_ago(2), started_at=_days_ago(1),
-        downtime_hours=6,
-    ))
-    db.add(MachineBreakdown(
-        factory_id=fid, machine_id=machines[7].id, occurred_at=_days_ago(3),
-        resolved_at=_days_ago(2), cause_category="electrical",
-        description="Compressor motor failure.", impact_on_production="Low — utility backup used.",
-    ))
-
-    # ---- Workforce + attendance ----
-    depts = ["Production", "Quality", "Maintenance", "Logistics", "Supervision"]
     workers = []
-    for i in range(1, 11):
-        w = Worker(
-            factory_id=fid, employee_id=f"EMP-{str(i).zfill(3)}", name=f"Worker {i}",
-            department=depts[i % len(depts)], role="Operator",
-            skills="packing;quality" if i % 2 else "assembly;forklift", status="active",
-        )
-        db.add(w)
-        db.flush()
+    for emp_id, name, dept, role in worker_names:
+        w = Worker(factory_id=fid, employee_id=emp_id, name=name,
+                   department=dept, role=role, status="active",
+                   skills=[role, dept])
         workers.append(w)
+        db.add(w)
+    db.flush()
+    # 7 days of attendance
+    for w in workers:
         for d in range(7):
-            day = _today() - dt.timedelta(days=d)
-            if day.weekday() >= 5:
-                continue
-            status = "present" if random.random() > 0.08 else ("late" if random.random() > 0.5 else "absent")
+            att_date = today - timedelta(days=d)
+            status = "present" if rng.random() > 0.08 else ("absent" if rng.random() > 0.5 else "late")
             db.add(AttendanceRecord(
-                factory_id=fid, worker_id=w.id, record_date=day, scheduled=True,
-                status=status, overtime_hours=round(random.uniform(0, 2), 1) if status == "present" else 0,
+                factory_id=fid, worker_id=w.id, attendance_date=att_date,
+                scheduled_hours=8, actual_hours=8 if status == "present" else (7 if status == "late" else 0),
+                ot_hours=rng.choice([0, 0, 0, 1, 2]),
+                status=status,
             ))
-        # shift assignment for this week
-        db.add(ShiftAssignment(
-            factory_id=fid, worker_id=w.id, shift_id=shifts[0].id,
-            week_start=_today() - dt.timedelta(days=_today().weekday()),
-            day_of_week=(i % 5) + 1,
-        ))
 
-    # ---- Product costs (last 3 months) ----
-    months = [(_today().replace(day=1) - dt.timedelta(days=32 * k)).strftime("%Y-%m") for k in range(3)]
-    months = sorted(set(months))
-    for p in products[:6]:
-        for mi, mlabel in enumerate(months):
-            std = p.standard_cost
-            act = round(std * random.uniform(0.95, 1.12), 2)
+    # ---------- Product Costs (3 months) ----------
+    for prod in products[:7]:
+        for m in range(3):
+            period = (today.replace(day=1) - timedelta(days=30 * m))
+            std = prod.standard_cost
+            variance = rng.uniform(0.92, 1.12)
             db.add(ProductCost(
-                factory_id=fid, product_id=p.id, period_label=mlabel,
-                std_material_cost=std, act_material_cost=act,
-                std_labor_cost=round(std * 0.3, 2), act_labor_cost=round(std * 0.3 * random.uniform(0.9, 1.1), 2),
-                std_overhead_cost=round(std * 0.2, 2), act_overhead_cost=round(std * 0.2 * random.uniform(0.9, 1.1), 2),
-                std_total=round(std * 1.5, 2), act_total=round(act * 1.5, 2),
+                factory_id=fid, product_id=prod.id, period_date=period,
+                std_material_cost=std * 0.55, act_material_cost=std * 0.55 * variance,
+                std_labor_cost=std * 0.25,    act_labor_cost=std * 0.25 * variance,
+                std_overhead_cost=std * 0.20, act_overhead_cost=std * 0.20 * variance,
+                std_total_cost=std,           act_total_cost=std * variance,
+                revenue=prod.selling_price * rng.randint(500, 2000),
             ))
 
-    # ---- KPI definitions ----
+    # ---------- KPI Definitions ----------
     kpi_defs = [
-        ("plan_adherence", "Plan Adherence", "production", 95, 90, 80, True, "percentage"),
-        ("oee", "OEE", "production", 85, 75, 65, True, "percentage"),
-        ("machine_availability", "Machine Availability", "production", 90, 80, 70, True, "percentage"),
-        ("otif", "OTIF %", "sales", 95, 90, 80, True, "percentage"),
-        ("order_fill_rate", "Order Fill Rate", "sales", 98, 92, 85, True, "percentage"),
-        ("inventory_days", "Inventory Days of Cover", "inventory", 30, 45, 60, False, "number"),
-        ("inventory_health", "Inventory Health", "inventory", 90, 75, 60, True, "percentage"),
-        ("quality_fpy", "Quality FPY", "quality", 98, 95, 90, True, "percentage"),
-        ("defect_rate", "Defect Rate", "quality", 2, 5, 8, False, "percentage"),
-        ("pm_compliance", "PM Compliance", "maintenance", 95, 85, 75, True, "percentage"),
-        ("mtbf", "MTBF (hours)", "maintenance", 720, 500, 300, True, "number"),
-        ("gross_margin", "Gross Margin", "financial", 35, 25, 15, True, "percentage"),
-        ("cost_variance", "Cost Variance", "financial", 3, 8, 12, False, "percentage"),
+        ("OEE",          "OEE %",             "production",   "%",  85, 75, 60,  True,  "percentage"),
+        ("PLAN_ADH",     "Plan Adherence",    "production",   "%",  95, 85, 70,  True,  "percentage"),
+        ("OTIF",         "OTIF %",            "sales",        "%",  95, 85, 75,  True,  "percentage"),
+        ("INV_DAYS",     "Inventory Days",    "inventory",    "d",  30, 45, 60,  False, "number"),
+        ("QUALITY_FPY",  "First Pass Yield",  "quality",      "%",  98, 95, 90,  True,  "percentage"),
+        ("DEFECT_RATE",  "Defect Rate",       "quality",      "%",  2,  4,  6,   False, "percentage"),
+        ("PM_COMPL",     "PM Compliance",     "maintenance",  "%",  95, 85, 70,  True,  "percentage"),
+        ("AVAIL",        "Machine Availability","maintenance","%",  90, 80, 70,  True,  "percentage"),
+        ("ATTEND",       "Attendance Rate",   "financial",    "%",  95, 90, 85,  True,  "percentage"),
+        ("MARGIN",       "Gross Margin",      "financial",    "%",  35, 25, 15,  True,  "percentage"),
     ]
-    kpi_objs = []
-    for code, name, cat, target, warn, crit, hib, fmt in kpi_defs:
-        kd = KPIDefinition(
-            factory_id=fid, code=code, name=name, category=cat, target_value=target,
-            warning_threshold=warn, critical_threshold=crit, higher_is_better=hib,
-            display_format=fmt, is_custom=False, is_active=True,
-        )
-        db.add(kd)
-        db.flush()
-        kpi_objs.append(kd)
+    kpi_rows = []
+    for code, name, cat, unit, tgt, warn, crit, hib, fmt in kpi_defs:
+        kpi_rows.append(KPIDefinition(
+            factory_id=fid, code=code, name=name, category=cat, unit=unit,
+            target_value=tgt, warning_threshold=warn, critical_threshold=crit,
+            higher_is_better=hib, display_format=fmt, is_custom=False, is_active=True,
+        ))
+    db.add_all(kpi_rows); db.flush()
 
-    # KPI values last 30 days
-    for kd in kpi_objs:
-        base = kd.target_value or 50
-        for d in range(30, 0, -1):
-            day = _days_ago(d)
-            noise = random.uniform(-0.06, 0.06)
-            trend = (30 - d) / 600.0  # slight upward
-            val = base * (1 + noise + trend)
-            if kd.higher_is_better:
-                val = max(val, kd.critical_threshold * 0.9)
+    # 30 days of KPI values for sparklines
+    for kpi in kpi_rows:
+        for d in range(30):
+            dt = today - timedelta(days=d)
+            tgt = kpi.target_value or 80
+            val = tgt + rng.uniform(-10, 10)
+            if kpi.higher_is_better:
+                val = max(0, min(100, val))
             else:
-                val = min(val, kd.critical_threshold * 1.2)
+                val = max(0, val)
             status = "good"
-            if kd.higher_is_better:
-                if val < (kd.critical_threshold or 0): status = "critical"
-                elif val < (kd.warning_threshold or 0): status = "warning"
+            if kpi.higher_is_better:
+                if val < (kpi.critical_threshold or 0): status = "critical"
+                elif val < (kpi.warning_threshold or 0): status = "warning"
             else:
-                if val > (kd.critical_threshold or 100): status = "critical"
-                elif val > (kd.warning_threshold or 100): status = "warning"
+                if val > (kpi.critical_threshold or 100): status = "critical"
+                elif val > (kpi.warning_threshold or 100): status = "warning"
             db.add(KPIValue(
-                kpi_id=kd.id, factory_id=fid, period_type="daily", period_date=day,
-                value=round(val, 2), status=status, calculated_at=_now(),
+                kpi_id=kpi.id, factory_id=fid,
+                period_type="daily", period_date=dt,
+                value=round(val, 2), status=status,
+                calculated_at=datetime.utcnow(),
             ))
 
-    # ---- Alerts ----
-    alerts = [
-        ("stockout", "emergency", "Raw material CAP (RM-015) stock at ZERO",
-         "Cap inventory reached 0 — packaging line at risk of stoppage.", "inventory", by_rm["RM-015"].id),
-        ("low_stock", "critical", "Cocoa Powder below safety stock",
-         "On hand 40 vs safety 100 — reorder immediately.", "inventory", by_rm["RM-007"].id),
-        ("quality", "critical", "OQC failure — Bottled Drink 500ml",
-         "Defect rate 11.25% exceeds limit. CAPA opened.", "quality", failed_qc.id if failed_qc else None),
-        ("maintenance", "warning", "Preventive maintenance overdue — Mixer",
-         "Next due 10 days ago. Schedule corrective window.", "maintenance", machines[4].id),
-        ("delivery", "warning", "Purchase order PO-2026-002 overdue",
-         "Expected 2 days ago, still in transit.", "procurement", None),
-        ("info", "info", "Daily production plan generated",
-         "6 orders scheduled across 3 lines.", "production", None),
-    ]
-    for atype, sev, title, msg, mod, sid in alerts:
-        db.add(Alert(
-            factory_id=fid, alert_type=atype, severity=sev, title=title, message=msg,
-            source_module=mod, source_id=sid, is_read=(sev == "info"), is_resolved=False,
-            created_at=_days_ago(random.randint(0, 3)),
-        ))
+    # ---------- Alerts ----------
+    db.add_all([
+        Alert(factory_id=fid, alert_type="inventory_critical", severity="emergency",
+              title="RM-SALT stock depleted", message="Raw material 'Salt' is at 0 units — production halt risk."),
+        Alert(factory_id=fid, alert_type="machine_down", severity="critical",
+              title="Reactor C2 is down", message="Machine M-302 reported down — production line C impacted."),
+        Alert(factory_id=fid, alert_type="quality_failure", severity="critical",
+              title="OQC failure — Apple Juice batch", message="Defect rate 12.5% exceeds threshold. NCR-001 opened."),
+        Alert(factory_id=fid, alert_type="maintenance_overdue", severity="warning",
+              title="PM overdue: M-202", message="Preventive maintenance on Labeler B2 is 3 days overdue."),
+        Alert(factory_id=fid, alert_type="sales_at_risk", severity="warning",
+              title="Sales order at risk", message="ORD-...-001 rush order required delivery in 2 days."),
+        Alert(factory_id=fid, alert_type="system", severity="info",
+              title="EMICP ready", message="All systems operational."),
+    ])
 
-    # ---- Decisions ----
-    decisions = [
-        ("procurement", "Approve urgent PO for Cocoa Powder",
-         "RM-007 critically low. Issue PO-2026-004 to NutFarm.",
-         "Cost EGP 300; avoids line stoppage.", "urgent"),
-        ("production", "Reschedule PST-006 to Night shift",
-         "Assembly line overloaded in afternoon; move 350 units to Night.",
-         "Improves adherence to 96%.", "high"),
-        ("sales", "Accept rush order CUST-004",
-         "400 units PST-006 due in 1 day. Capacity available on Night shift.",
-         "Revenue EGP 2,200; margin positive.", "high"),
-    ]
-    for dtype, title, desc, rec, prio in decisions:
-        db.add(Decision(
-            factory_id=fid, decision_type=dtype, title=title, description=desc,
-            recommendation=rec, impact_summary={}, status="pending", priority=prio,
-            created_at=_days_ago(1),
-        ))
+    # ---------- Decisions ----------
+    db.add_all([
+        Decision(factory_id=fid, decision_type="approve_po",
+                 title="Approve PO for RM-PET restock",
+                 description="MRP recommends ordering 2000kg PET resin to cover next 14-day demand.",
+                 recommendation="APPROVE — supplier rating 5/5, on-time delivery 96%.",
+                 priority="high",
+                 impact_summary={"cost_egp": "2900", "covers_days": "14"}),
+        Decision(factory_id=fid, decision_type="reschedule_order",
+                 title="Reschedule Apple Juice order ORD-...-003",
+                 description="Order requires delivery in 2 days; line C is down.",
+                 recommendation="MOVE to line A with 0.5 day delay; notify customer.",
+                 priority="urgent",
+                 impact_summary={"delay_days": "0.5", "at_risk_value_egp": "28000"}),
+        Decision(factory_id=fid, decision_type="accept_rush",
+                 title="Accept rush order from Hypermarket Co",
+                 description="Rush order for 5000 BTL-500, 48-hour delivery.",
+                 recommendation="ACCEPT with 12% rush surcharge; assign to line A night shift.",
+                 priority="urgent",
+                 impact_summary={"revenue_egp": "6875", "ot_hours": "16"}),
+    ])
 
-    # ---- Demand forecasts (last 6 + next 3 months) ----
-    for p in products[:5]:
-        for k in range(-6, 3):
-            mlabel = (_today().replace(day=1) + dt.timedelta(days=32 * k)).strftime("%Y-%m")
-            hist = random.randint(500, 2000) if k < 0 else 0
-            sys_f = random.randint(600, 1800)
-            db.add(DemandForecast(
-                factory_id=fid, product_id=p.id, period_type="monthly", period_label=mlabel,
-                historical=hist, system_forecast=sys_f, final_forecast=sys_f,
-            ))
-
-    # ---- App settings ----
-    defaults = {
-        "language": "en",
-        "default_factory_id": str(fid),
-        "auto_backup": "true",
-        "auto_backup_time": "23:00",
-        "backup_keep": "30",
-        "theme": "light",
-    }
-    for k, v in defaults.items():
-        db.add(AppSetting(key=k, value=v, description=""))
-
-    db.add(BackupLog(
-        filename="emicp_seed.db", backup_type="manual", file_size_bytes=0,
-        file_path="seed", status="success", created_at=_now(),
-    ))
+    # ---------- App Settings ----------
+    db.add_all([
+        AppSetting(key="default_factory_id", value=str(fid), description="Active factory on startup"),
+        AppSetting(key="language",          value="en",       description="UI language"),
+        AppSetting(key="auto_backup",       value="true",     description="Auto backup on schedule"),
+        AppSetting(key="backup_time",       value="23:00",    description="Daily backup time"),
+        AppSetting(key="backup_keep",       value="30",       description="Backups to keep"),
+        AppSetting(key="theme",             value="light",    description="UI theme"),
+    ])
 
     db.commit()
+    logger.info("Demo data seeded successfully")
+    return {"seeded": True, "factory_id": fid}
