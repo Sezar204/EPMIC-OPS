@@ -1,58 +1,59 @@
-import { forwardRef, useId } from "react"
+Input
+import { InputHTMLAttributes, forwardRef, ReactNode } from "react"
 import { cn } from "@/utils/cn"
 
-interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   label?: string
   error?: string
   hint?: string
   required?: boolean
-  leftIcon?: React.ReactNode
-  rightIcon?: React.ReactNode
+  leftIcon?: ReactNode
+  rightIcon?: ReactNode
 }
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(
   ({ className, label, error, hint, required, leftIcon, rightIcon, id, ...props }, ref) => {
-    const generatedId = useId()
-    const inputId = id ?? generatedId
+    const inputId = id || `input-${Math.random().toString(36).slice(2, 9)}`
     return (
       <div className="w-full">
         {label && (
-          <label htmlFor={inputId} className="block text-sm font-medium text-slate-700 mb-1">
-            {label}
-            {required && <span className="text-danger ml-0.5">*</span>}
+          <label htmlFor={inputId} className="block text-xs font-medium text-slate-700 mb-1">
+            {label}{required && <span className="text-danger ml-0.5">*</span>}
           </label>
         )}
         <div className="relative">
           {leftIcon && (
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
+            <div className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400">
               {leftIcon}
-            </span>
+            </div>
           )}
           <input
             ref={ref}
             id={inputId}
             className={cn(
-              "w-full h-9 rounded-lg border bg-white px-3 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/30",
-              leftIcon && "pl-9",
-              rightIcon && "pr-9",
-              error ? "border-danger focus:ring-danger/30" : "border-border",
+              "w-full h-9 text-sm border rounded-md bg-white",
+              "focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary",
+              "disabled:bg-slate-50 disabled:text-slate-500",
+              "placeholder:text-slate-400",
+              leftIcon  ? "pl-8" : "pl-3",
+              rightIcon ? "pr-8" : "pr-3",
+              error ? "border-danger" : "border-slate-300",
               className
             )}
             {...props}
           />
           {rightIcon && (
-            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">
+            <div className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400">
               {rightIcon}
-            </span>
+            </div>
           )}
         </div>
-        {error ? (
-          <p className="mt-1 text-xs text-danger">{error}</p>
-        ) : hint ? (
-          <p className="mt-1 text-xs text-slate-400">{hint}</p>
-        ) : null}
+        {error && <p className="mt-1 text-xs text-danger">{error}</p>}
+        {!error && hint && <p className="mt-1 text-xs text-slate-500">{hint}</p>}
       </div>
     )
   }
 )
 Input.displayName = "Input"
+
+export default Input
